@@ -3,7 +3,7 @@ season,team_id,team_name,team_tier
 2025-26,13,Man City,1.0
 2025-26,7,Chelsea,2.0
 2025-26,12,Liverpool,2.0
-2025-26,2,Aston Villa,2.0
+2025-26,2,Aston Villa,3.0
 2025-26,14,Man United,2.0
 2025-26,4,Bournemouth,3.0
 2025-26,8,Crystal Palace,3.0
@@ -12,7 +12,7 @@ season,team_id,team_name,team_tier
 2025-26,9,Everton,3.0
 2025-26,5,Brentford,3.0
 2025-26,10,Fulham,3.0
-2025-26,6,Brighton,4.0
+2025-26,6,Brighton,3.0
 2025-26,18,Tottenham,4.0
 2025-26,16,Nott'm Forest,4.0
 2025-26,11,Leeds,4.0

@@ -63,28 +63,47 @@ def load_bundled_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     return multipliers, team_tiers
 
 
-def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
-                     start_gw: int, non_playing: List[Tuple[int, List[int]]],
-                     free_hit_gws: List[int], fh_benefits: Dict,
-                     initial_bank: int, initial_selling_prices: Dict[int, int]) -> None:
-    """Display the optimal strategy in a user-friendly way."""
+def _player_name(players: pd.DataFrame, pid: int) -> str:
+    row = players[players["element"] == pid]
+    return row["name"].iloc[0] if len(row) else str(pid)
+
+
+def _player_cost(players: pd.DataFrame, pid: int) -> float:
+    row = players[players["element"] == pid]
+    return row["value"].iloc[0] / 10 if len(row) else 0.0
+
+
+def _build_strategy_text(
+    solution: Dict, solver: FPLSolver, players: pd.DataFrame,
+    start_gw: int, total_points: float, scenario_name: str,
+    non_playing: List[Tuple[int, List[int]]],
+    free_hit_gws: List[int], fh_benefits: Dict,
+    initial_bank: int, initial_selling_prices: Dict[int, int],
+) -> str:
+    """
+    Build the full visual strategy text.
+
+    Returns:
+        Multi-line string with the formatted strategy.
+    """
     non_playing = non_playing or []
     initial_selling_prices = initial_selling_prices or {}
-
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("OPTIMAL FPL STRATEGY")
-    logger.info("=" * 80)
-    logger.info("Total Expected Points: %.1f", solution["objective_value"])
-    logger.info("Average per GW: %.1f", solution["objective_value"] / solver.T)
+    lines: List[str] = []
+    W = 78
 
     predictions = solver.predictions
     expected_points: Dict[Tuple[int, int], float] = {}
     for _, row in predictions.iterrows():
         key = (int(row["element"]), int(row["event"]))
         expected_points[key] = expected_points.get(key, 0) + row["predicted_points"]
-
     player_market_prices = dict(zip(players["element"], players["value"]))
+
+    # Header
+    lines.append("=" * W)
+    lines.append(f"  FPL SOLVER  -  OPTIMAL STRATEGY")
+    lines.append(f"  GW {start_gw}-{start_gw + solver.T - 1}  |  {total_points:.1f} expected pts  |  {total_points / solver.T:.1f} per GW")
+    lines.append(f"  Scenario: {scenario_name}")
+    lines.append("=" * W)
 
     cumulative_bank = initial_bank
     selling_prices = dict(initial_selling_prices)
@@ -98,22 +117,35 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
         lineup_data = solution["lineups"].get(t, {})
         lineup_ids = lineup_data.get("starters", []) if lineup_data else []
 
-        is_free_hit_gw = free_hit_gws and gw in free_hit_gws
-        is_bench_boost_gw = "bench_boost" in chips
-        is_triple_captain_gw = "triple_captain" in chips
+        is_fh = free_hit_gws and gw in free_hit_gws
+        is_bb = "bench_boost" in chips
+        is_tc = "triple_captain" in chips
+        is_wc = "wildcard" in chips
 
-        gw_label = f"\nGAMEWEEK {gw}"
-        if is_free_hit_gw:
-            gw_label += " [FREE HIT]"
-        if is_bench_boost_gw:
-            gw_label += " [BENCH BOOST]"
-        if is_triple_captain_gw:
-            gw_label += " [TRIPLE CAPTAIN]"
-        logger.info(gw_label)
+        # GW header
+        chip_badges = []
+        if is_wc:
+            chip_badges.append("[WILDCARD]")
+        if is_fh:
+            chip_badges.append("[FREE HIT]")
+        if is_bb:
+            chip_badges.append("[BENCH BOOST]")
+        if is_tc:
+            chip_badges.append("[TRIPLE CAPTAIN]")
+        badge_str = "  ".join(chip_badges)
 
-        available_transfers = transfers.get("available_transfers", 0)
-        logger.info("  Free Transfers: %d", int(available_transfers))
+        lines.append("")
+        lines.append("-" * W)
+        gw_header = f"  GW {gw}"
+        if badge_str:
+            gw_header += f"  {badge_str}"
+        lines.append(gw_header)
+        lines.append("-" * W)
 
+        available_ft = int(transfers.get("available_transfers", 0))
+        lines.append(f"  Free Transfers: {available_ft}")
+
+        # Track bank
         if transfers["out"]:
             for pid in transfers["out"]:
                 sell_price = selling_prices.get(pid, player_market_prices.get(pid, 0))
@@ -125,56 +157,49 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
                 cumulative_bank -= buy_price
                 selling_prices[pid] = buy_price
 
-        if is_free_hit_gw:
-            logger.info("  FREE HIT: Using optimal squad for this GW")
+        # Transfers
+        if is_fh:
             fh_data = fh_benefits.get(gw, {})
-            if fh_data:
-                logger.info("    Expected points: %.1f", fh_data.get("total_points", 0))
+            fh_pts = fh_data.get("total_points", 0)
+            lines.append(f"  FREE HIT: Optimal squad selected from entire pool ({fh_pts:.1f} pts)")
         elif transfers["count"] > 0:
             real_in = [p for p in transfers["in"] if p not in transfers["out"]]
             real_out = [p for p in transfers["out"] if p not in transfers["in"]]
             real_count = len(real_in)
-
             if real_count > 0:
                 wildcard_active = transfers.get("wildcard_active", False)
-                paid = transfers.get("paid_transfers", 0)
-                free = transfers.get("free_transfers", 0)
-
-                info = f"  Transfers ({real_count}"
+                paid = int(transfers.get("paid_transfers", 0))
+                free = int(transfers.get("free_transfers", 0))
                 if wildcard_active:
-                    info += " - WILDCARD, all free"
+                    desc = "WILDCARD - all free"
                 elif paid > 0:
-                    info += f" - {int(free)} free, {int(paid)} paid [{int(paid * TRANSFER_PENALTY_POINTS)} pts]"
+                    desc = f"{free} free, {paid} paid ({paid * TRANSFER_PENALTY_POINTS} pts)"
                 else:
-                    info += " - all free"
-                info += "):"
-                logger.info(info)
-
+                    desc = "all free"
+                lines.append(f"  Transfers ({real_count} - {desc}):")
                 for pid in real_in:
-                    row = players[players["element"] == pid]
-                    name = row["name"].iloc[0] if len(row) else str(pid)
-                    cost = row["value"].iloc[0] / 10 if len(row) else 0
+                    name = _player_name(players, pid)
+                    cost = _player_cost(players, pid)
                     pts = expected_points.get((pid, gw), 0)
                     if any(pid == p and gw in gws for p, gws in non_playing):
                         pts = 0
-                    logger.info("    IN:  %s (%.1fM | %.1f pts)", name, cost, pts)
-
+                    lines.append(f"    >>> IN:  {name:<25s} {cost:5.1f}M | {pts:5.1f} pts")
                 for pid in real_out:
-                    row = players[players["element"] == pid]
-                    name = row["name"].iloc[0] if len(row) else str(pid)
-                    cost = row["value"].iloc[0] / 10 if len(row) else 0
+                    name = _player_name(players, pid)
+                    cost = _player_cost(players, pid)
                     pts = expected_points.get((pid, gw), 0)
-                    logger.info("    OUT: %s (%.1fM | %.1f pts)", name, cost, pts)
+                    lines.append(f"    <<< OUT: {name:<25s} {cost:5.1f}M | {pts:5.1f} pts")
             else:
-                logger.info("  No transfers")
+                lines.append("  No transfers")
         else:
-            logger.info("  No transfers")
+            lines.append("  No transfers")
 
+        # Captain
         if captain_id:
-            if is_free_hit_gw and fh_benefits and gw in fh_benefits:
+            if is_fh and fh_benefits and gw in fh_benefits:
                 fh_data = fh_benefits[gw]
+                cap_name = None
                 if "squad_details" in fh_data:
-                    cap_name = None
                     for pos_players in fh_data["squad_details"].values():
                         for p in pos_players:
                             if p.get("is_captain"):
@@ -182,80 +207,78 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
                                 break
                         if cap_name:
                             break
-                    cap_name = cap_name or "Unknown"
-                else:
-                    row = players[players["element"] == captain_id]
-                    cap_name = row["name"].iloc[0] if len(row) else str(captain_id)
+                cap_name = cap_name or _player_name(players, captain_id)
             else:
-                row = players[players["element"] == captain_id]
-                cap_name = row["name"].iloc[0] if len(row) else str(captain_id)
+                cap_name = _player_name(players, captain_id)
+            mult = "3x" if is_tc else "2x"
+            lines.append(f"  Captain: {cap_name} ({mult} points)")
 
-            multiplier = "3x" if is_triple_captain_gw else "2x"
-            logger.info("  Captain: %s (%s points)", cap_name, multiplier)
-
-        if squad_ids and not is_free_hit_gw:
-            _display_squad(squad_ids, players, expected_points, gw, captain_id,
-                           lineup_ids, chips, cumulative_bank, non_playing)
-
-        if is_free_hit_gw and fh_benefits and gw in fh_benefits:
+        # Squad display
+        if is_fh and fh_benefits and gw in fh_benefits:
             fh = fh_benefits[gw]
             if "squad_details" in fh:
-                _display_fh_squad(fh["squad_details"])
+                lines.append("")
+                for pos in ["GK", "DEF", "MID", "FWD"]:
+                    if pos not in fh["squad_details"]:
+                        continue
+                    lines.append(f"    {pos}:")
+                    for p in fh["squad_details"][pos]:
+                        starter = "*" if p["is_starter"] else " "
+                        cap = " (C)" if p.get("is_captain") else ""
+                        lines.append(f"      {starter} {p['name']:<25s} {p['cost']/10:5.1f}M | {p['points']:5.1f} pts{cap}")
+        elif squad_ids:
+            positions: Dict[str, List[Dict]] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+            for pid in squad_ids:
+                row = players[players["element"] == pid]
+                if len(row) == 0:
+                    continue
+                info = row.iloc[0]
+                pts = expected_points.get((pid, gw), 0)
+                if any(pid == p and gw in gws for p, gws in non_playing):
+                    pts = 0
+                positions[info["position"]].append({
+                    "name": info["name"], "cost": info["value"] / 10,
+                    "pts": pts, "starter": pid in lineup_ids,
+                    "captain": pid == captain_id,
+                })
+            lines.append("")
+            for pos in ["GK", "DEF", "MID", "FWD"]:
+                if not positions[pos]:
+                    continue
+                lines.append(f"    {pos}:")
+                for p in sorted(positions[pos], key=lambda x: (-x["starter"], -x["pts"])):
+                    starter = "*" if p["starter"] else " "
+                    cap = " (C)" if p["captain"] else ""
+                    lines.append(f"      {starter} {p['name']:<25s} {p['cost']:5.1f}M | {p['pts']:5.1f} pts{cap}")
+            lines.append(f"    Bank: {cumulative_bank / 10:.1f}M")
 
-    logger.info("")
-    logger.info("=" * 80)
+    lines.append("")
+    lines.append("=" * W)
+    return "\n".join(lines)
 
 
-def _display_squad(squad_ids, players, expected_points, gw, captain_id,
-                   lineup_ids, chips, bank, non_playing):
-    """Display squad composition for a gameweek."""
-    is_bb = "bench_boost" in chips
-    positions = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
+                     start_gw: int, total_points: float, scenario_name: str,
+                     non_playing: List[Tuple[int, List[int]]],
+                     free_hit_gws: List[int], fh_benefits: Dict,
+                     initial_bank: int, initial_selling_prices: Dict[int, int]) -> str:
+    """
+    Display the optimal strategy to console and return the text.
 
-    for pid in squad_ids:
-        row = players[players["element"] == pid]
-        if len(row) == 0:
-            continue
-        info = row.iloc[0]
-        pts = expected_points.get((pid, gw), 0)
-        if any(pid == p and gw in gws for p, gws in non_playing):
-            pts = 0
-        is_starter = pid in lineup_ids
-        is_captain = pid == captain_id
-        positions[info["position"]].append({
-            "name": info["name"], "cost": info["value"] / 10,
-            "pts": pts, "starter": is_starter, "captain": is_captain,
-        })
-
-    for pos in ["GK", "DEF", "MID", "FWD"]:
-        if not positions[pos]:
-            continue
-        logger.info("    %s:", pos)
-        for p in sorted(positions[pos], key=lambda x: x["cost"], reverse=True):
-            mark = "*" if p["starter"] else " "
-            cap = " (C)" if p["captain"] else ""
-            logger.info("      %s %-25s %5.1fM | %5.1f pts%s",
-                        mark, p["name"], p["cost"], p["pts"], cap)
-
-    logger.info("    Bank: %.1fM", bank / 10)
-
-
-def _display_fh_squad(squad_details):
-    """Display Free Hit squad details."""
-    for pos in ["GK", "DEF", "MID", "FWD"]:
-        if pos not in squad_details:
-            continue
-        logger.info("    %s:", pos)
-        for p in squad_details[pos]:
-            mark = "*" if p["is_starter"] else " "
-            cap = " (C)" if p.get("is_captain") else ""
-            logger.info("      %s %-25s %5.1fM | %5.1f pts%s",
-                        mark, p["name"], p["cost"] / 10, p["points"], cap)
+    Returns:
+        Formatted strategy text (also printed to console).
+    """
+    text = _build_strategy_text(
+        solution, solver, players, start_gw, total_points, scenario_name,
+        non_playing, free_hit_gws, fh_benefits, initial_bank, initial_selling_prices,
+    )
+    print(text)
+    return text
 
 
 def save_strategy(solution: Dict, scenario_name: str, total_points: float,
-                  current_gw: int) -> None:
-    """Save strategy to JSON file."""
+                  current_gw: int, strategy_text: str = "") -> None:
+    """Save strategy to JSON and formatted text file."""
     OUTPUT_DIR.mkdir(exist_ok=True)
     output = {
         "scenario": scenario_name,
@@ -266,10 +289,16 @@ def save_strategy(solution: Dict, scenario_name: str, total_points: float,
         "captains": {str(k): v for k, v in solution["captains"].items()},
         "chips": {str(k): v for k, v in solution["chips"].items()},
     }
-    path = OUTPUT_DIR / f"strategy_gw{current_gw}.json"
-    with open(path, "w") as f:
+    json_path = OUTPUT_DIR / f"strategy_gw{current_gw}.json"
+    with open(json_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
-    logger.info("Saved strategy to %s", path)
+    logger.info("Saved JSON strategy to %s", json_path)
+
+    if strategy_text:
+        txt_path = OUTPUT_DIR / f"strategy_gw{current_gw}.txt"
+        with open(txt_path, "w") as f:
+            f.write(strategy_text)
+        logger.info("Saved visual strategy to %s", txt_path)
 
 
 def main() -> None:
@@ -503,15 +532,16 @@ def main() -> None:
     logger.info("")
     logger.info("BEST STRATEGY: %s (%.1f pts)", best_result["scenario_name"], best_total)
 
-    display_strategy(
+    strategy_text = display_strategy(
         best_result["solution"], best_result["solver"], best_result["players"],
-        current_gw, overrides.get("non_playing", []),
+        current_gw, best_total, best_result["scenario_name"],
+        overrides.get("non_playing", []),
         best_result["free_hit_gws"], fh_benefits,
         initial_bank, initial_selling_prices,
     )
 
     save_strategy(best_result["solution"], best_result["scenario_name"],
-                  best_total, current_gw)
+                  best_total, current_gw, strategy_text=strategy_text)
 
 
 if __name__ == "__main__":

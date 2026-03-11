@@ -32,7 +32,6 @@ MAX_PLAYERS_PER_CLUB = 3
 MAX_FREE_TRANSFERS = 5
 TRANSFER_PENALTY_POINTS = -4
 FREE_HIT_TRANSFER_PENALTY = -1000
-FIRST_GW_TRANSFER_PENALTY = -2
 CHIP_WINDOWS = {'first_half': (1, 19), 'second_half': (20, 38)}
 
 
@@ -94,9 +93,7 @@ class FPLSolver:
         self.forced_lineup_players = forced_lineup_players or []
         self.non_playing_players = non_playing_players or []
         self.free_hit_gws = free_hit_gws or []
-        self.first_gw_transfer_penalty = (
-            first_gw_transfer_penalty if first_gw_transfer_penalty is not None else FIRST_GW_TRANSFER_PENALTY
-        )
+        self.first_gw_transfer_penalty = first_gw_transfer_penalty if first_gw_transfer_penalty is not None else -1
         self.sub_probability = sub_probability
         self.bench_boost_gw = bench_boost_gw
         self.triple_captain_gw = triple_captain_gw

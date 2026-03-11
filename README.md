@@ -99,6 +99,8 @@ If you set a value here, it overrides the API detection. If you omit a value (or
 | `chips.bench_boost_used` | int (0-2) | auto | How many Bench Boosts have been used |
 | `chips.triple_captain_used` | int (0-2) | auto | How many Triple Captains have been used |
 
+**Tip:** If you're running a short planning horizon and want to save a chip for later (beyond the horizon window), set it to `2` to make it unavailable to the solver. This also significantly speeds up optimization since it eliminates that chip's scenarios from the enumeration.
+
 ### Transfer Top-up
 
 Models a mid-season transfer window (e.g. AFCON, injury crisis) where the solver is allowed extra free transfers at a specific GW.
