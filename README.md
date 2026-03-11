@@ -12,7 +12,7 @@ The tool has two engines that run in sequence:
 
 Generates per-player expected points for every future fixture using:
 
-- **Component-based prediction** — goals, assists, clean sheets, saves, bonus, defensive contribution, etc. are each predicted independently
+- **Component-based prediction** — goals, assists, clean sheets, saves, bonus, defensive contribution, etc. are each predicted independently using **expected stats (xG, xA, xGC)** rather than actual goals/assists, which reduces variance and gives more stable projections
 - **Fixture multipliers** — historical data (5 seasons) reveals how each stat component varies by position, opponent tier, and home/away. Player averages are normalized to remove fixture bias, then re-scaled for each upcoming fixture
 - **Poisson model** for clean sheet probability (from expected goals conceded)
 - **Player-specific consistency** for defensive contribution (DEF/MID threshold probability)
@@ -24,7 +24,7 @@ Formulates the entire remaining season as a single Mixed Integer Linear Program 
 - **Decision variables**: squad ownership, starting XI, captain, transfers in/out — per player per gameweek
 - **Objective**: maximize total expected points across all gameweeks (with captain bonus, bench value, and transfer penalties)
 - **Constraints**: budget, squad composition (2 GK / 5 DEF / 5 MID / 3 FWD), formation rules (3-5-2, 4-4-2, etc.), max 3 per club, transfer banking (up to 5 free transfers), chip rules
-- **Chip enumeration**: Wildcard, Free Hit, Bench Boost, and Triple Captain are decomposed into scenarios and solved independently — the best combination wins
+- **Chip enumeration**: Wildcard, Free Hit, Bench Boost, and Triple Captain are decomposed into scenarios and solved independently — the best combination wins. All four chips follow the same rule: one allowed per half-season (GW 1-19 and GW 20-38), giving two uses per season
 
 ## Quick Start
 
@@ -73,6 +73,72 @@ Everything else has sensible defaults or is auto-detected from the FPL API. See 
 | Chips used | Team history endpoint | `chips` section |
 | Current season | Bootstrap data | (not overridable) |
 
+### Player Overrides
+
+These let you inject domain knowledge the model can't detect on its own.
+
+**`non_playing`** — Players who won't play in specific GWs (injury, suspension, rotation). The solver sets their points to 0 but may keep them in the squad if it expects them back later.
+
+```yaml
+non_playing:
+  - player: 661     # Ekitike — knee injury
+    gameweeks: [28, 29, 30]
+  - player: 441     # Dorgu — suspended
+    gameweeks: [30]
+```
+
+**`forced_lineup`** — Force specific players into the starting XI for specific GWs. Use when you have strong conviction or want to lock a differential.
+
+```yaml
+forced_lineup:
+  - player: 235     # Palmer
+    gameweeks: [30, 31]
+```
+
+**`points_multiplier`** — Scale a player's predicted points up or down across all GWs. Useful when you believe the model under/over-estimates a player (e.g. a new signing with little history).
+
+```yaml
+points_multiplier:
+  - player: 235     # Palmer — model underestimates
+    multiplier: 1.5
+  - player: 267     # Sarr — form has dropped
+    multiplier: 0.7
+```
+
+**`excluded_players`** — Player IDs to permanently remove from the optimization pool.
+
+```yaml
+excluded_players:
+  - 5      # Gabriel — never want to own
+  - 237    # Enzo
+```
+
+**`extra_players`** — Player IDs to always include in the pool (beyond your current squad). Use for transfer targets.
+
+```yaml
+extra_players:
+  - 256    # Munoz
+  - 267    # Sarr
+```
+
+### Fixture Overrides (DGW / BGW)
+
+When the Premier League reschedules fixtures (postponements, double gameweeks, blank gameweeks), the FPL API may not be updated immediately. Use `fixture_overrides` to manually correct the schedule before running the solver.
+
+Each entry moves a specific fixture (identified by home and away team IDs) to a new gameweek. Team IDs can be found in `data/team_tiers.csv`.
+
+```yaml
+fixture_overrides:
+  # Arsenal (1) vs Chelsea (7) postponed, rescheduled to GW 33
+  - home_team: 1
+    away_team: 7
+    gameweek: 33
+  # Liverpool (12) vs Man City (13) moved to GW 29 (double gameweek)
+  - home_team: 12
+    away_team: 13
+    gameweek: 29
+```
+
 ## Output
 
 - **Console**: full GW-by-GW strategy (transfers, lineup, captain, chips)
@@ -80,20 +146,17 @@ Everything else has sensible defaults or is auto-detected from the FPL API. See 
 
 ## Disclaimers
 
-### API Limitations
+### Pending Transfers Not Visible
 
-- The FPL API reflects your squad as of the **last completed gameweek**. Pending transfers are NOT visible. If you've already made transfers in the FPL app, the solver doesn't know about them.
-- Free transfers cannot be reliably detected from the API. Always set `free_transfers` manually in `config.yaml`.
+The FPL API shows your squad as of the **last completed gameweek**. If you have already made transfers for the upcoming gameweek in the FPL app, the solver **will not see them** — your squad and free transfer count will be stale. Always run the solver **before** making transfers in the app.
+
+### Free Transfers
+
+Free transfers cannot be reliably detected from the API. Always set `free_transfers` manually in `config.yaml`.
 
 ### Injuries and Suspensions
 
-The solver has **no injury/suspension detection**. You must manually set players as non-playing in `config.yaml`:
-
-```yaml
-non_playing:
-  - player: 661     # Ekitike
-    gameweeks: [21, 22]
-```
+The solver has **no injury/suspension detection**. You must manually add injured or suspended players to the `non_playing` section in `config.yaml` (see Player Overrides above).
 
 ### Bundled Data
 
@@ -109,7 +172,7 @@ A multiplier of 1.2 means "players in this situation historically produce 20% mo
 
 #### `data/team_tiers.csv` — Team Tiers
 
-Maps each team to a tier (1-5) per season. Tiers are based on historical performance and are used by the multiplier system. **You should update this file at the start of each new season** to reflect promoted/relegated teams and any tier changes.
+Maps each Premier League team to a tier (1-5). Tiers are based on historical performance and are used by the multiplier system. **Update this file at the start of each new season** to reflect promoted/relegated teams and any tier changes.
 
 Format: `season,team_id,team_name,team_tier`
 
@@ -122,7 +185,7 @@ fpl-solver/
   requirements.txt
   data/
     multipliers.csv   # Pre-computed fixture multipliers (5 seasons)
-    team_tiers.csv    # Team tier assignments per season
+    team_tiers.csv    # Team tier assignments (current season)
   fpl/
     __init__.py
     api.py            # All FPL API calls (single source of truth)

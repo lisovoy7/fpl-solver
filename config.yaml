@@ -45,19 +45,15 @@ solver:
 
 # ---------- Chip usage state ----------
 # Auto-detected from FPL API if omitted. Override here if detection is wrong.
+# All four chip types follow the same rule: one per half-season (GW 1-19 and
+# GW 20-38), so each can be 0, 1, or 2.  All unused chips are automatically
+# enumerated by the solver — no enable/disable toggles needed.
 
 chips:
   wildcards_used: 1        # 0, 1, or 2 (one per half-season)
   free_hits_used: 1        # 0, 1, or 2 (one per half-season)
-  bench_boost_used: false   # true if already used this season
-  triple_captain_used: false
-
-# ---------- Chip optimization toggles ----------
-
-chip_optimization:
-  enable_free_hit: true
-  enable_bench_boost: true
-  enable_triple_captain: true
+  bench_boost_used: 1      # 0, 1, or 2 (one per half-season)
+  triple_captain_used: 2   # 0, 1, or 2 (one per half-season)
 
 # ---------- Transfer top-up rule ----------
 # After trigger_gw, the solver allows up to transfer_count free transfers
@@ -68,13 +64,27 @@ transfer_topup:
   trigger_gw: 15
   transfer_count: 5
 
-# ---------- Player overrides ----------
-# DISCLAIMER: The FPL API does NOT reflect pending transfers. Squad data is
-# always based on the last completed gameweek. Injuries, suspensions, and
-# expected absences must be entered manually below.
+# ---------- Fixture overrides (DGW / BGW) ----------
+# Override the gameweek assignment of specific fixtures.  Use this when the
+# official schedule changes (postponements, double gameweeks, blank gameweeks)
+# and the FPL API hasn't been updated yet.
+# Each entry needs: home_team (team_id), away_team (team_id), gameweek (new GW).
+# Find team IDs in data/team_tiers.csv.
 
-# Players who won't play in specific gameweeks (injury, suspension, etc.)
-# Solver sets their points to 0 but may keep them in the squad.
+fixture_overrides: []
+  # Example: move Arsenal (1) vs Chelsea (7) to GW 29 (double gameweek)
+  # - home_team: 1
+  #   away_team: 7
+  #   gameweek: 29
+
+# ---------- Player overrides ----------
+# DISCLAIMER: The FPL API does NOT reflect transfers you've already made for the
+# upcoming gameweek. If you've made transfers in the app, the solver won't see
+# them. Run the solver BEFORE making transfers. Injuries, suspensions, and
+# expected absences must also be entered manually below.
+
+# Players who won't play in specific gameweeks (injury, suspension, rotation).
+# Solver sets their expected points to 0 but may keep them in the squad.
 non_playing: []
   # - player: 661     # Ekitike
   #   gameweeks: [21, 22]
@@ -82,20 +92,24 @@ non_playing: []
   #   gameweeks: [25, 26, 27, 28]
 
 # Players forced into the starting lineup in specific gameweeks.
+# Use when you have insider knowledge or want to lock in a differential.
 forced_lineup: []
   # - player: 235     # Palmer
   #   gameweeks: [27]
 
 # Adjust predicted points for specific players (across all gameweeks).
-# multiplier > 1.0 = boost, < 1.0 = reduce.
+# multiplier > 1.0 = boost predictions, < 1.0 = reduce predictions.
+# Useful when you believe the model under/over-estimates a player.
 points_multiplier: []
-  # - player: 235
+  # - player: 235     # Palmer
   #   multiplier: 1.5
 
-# Player IDs to always exclude from the watchlist (e.g. non-differentials).
+# Player IDs to always exclude from the optimization pool.
+# Use for players you never want to own (non-differentials, personal preference).
 excluded_players: []
   # - 5    # Gabriel
 
-# Extra player IDs to always include in the watchlist (beyond current squad).
+# Extra player IDs to always include in the optimization pool
+# (beyond your current squad). Use for transfer targets you're watching.
 extra_players: []
   # - 256  # Munoz

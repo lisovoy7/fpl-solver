@@ -406,17 +406,19 @@ def detect_chips_used(team_id: int) -> Dict:
     """
     Fetch history data and parse chips array.
 
+    All four chip types follow the same rule: one allowed per half-season
+    (GW 1-19 and GW 20-38), so each can be used 0, 1, or 2 times total.
+
     Returns:
-        Dict with: wildcards_used (int), free_hits_used (int),
-        bench_boost_used (bool), triple_captain_used (bool).
+        Dict with total counts for each chip type (int, 0-2).
     """
     history = _fetch_history_data(team_id)
     chips = history.get("chips", [])
     result = {
         "wildcards_used": 0,
         "free_hits_used": 0,
-        "bench_boost_used": False,
-        "triple_captain_used": False,
+        "bench_boost_used": 0,
+        "triple_captain_used": 0,
     }
     for c in chips:
         name = c.get("name", "")
@@ -425,7 +427,7 @@ def detect_chips_used(team_id: int) -> Dict:
         elif name == "freehit":
             result["free_hits_used"] += 1
         elif name == "bboost":
-            result["bench_boost_used"] = True
+            result["bench_boost_used"] += 1
         elif name == "3xc":
-            result["triple_captain_used"] = True
+            result["triple_captain_used"] += 1
     return result

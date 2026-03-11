@@ -327,6 +327,24 @@ def main() -> None:
     fixtures = api.fetch_current_fixtures(bootstrap)
     logger.info("Fetched %d fixtures", len(fixtures))
 
+    # Apply fixture overrides (DGW/BGW schedule changes)
+    fixture_overrides = config.get("fixture_overrides", [])
+    for override in fixture_overrides:
+        home = override.get("home_team")
+        away = override.get("away_team")
+        new_gw = override.get("gameweek")
+        if home is None or away is None or new_gw is None:
+            continue
+        mask = (fixtures["team_h"] == home) & (fixtures["team_a"] == away)
+        matched = mask.sum()
+        if matched > 0:
+            old_gw = fixtures.loc[mask, "event"].iloc[0]
+            fixtures.loc[mask, "event"] = new_gw
+            logger.info("Fixture override: team %d vs %d moved from GW %s to GW %d",
+                        home, away, old_gw, new_gw)
+        else:
+            logger.warning("Fixture override: no match for team %d vs %d", home, away)
+
     predictions_path = OUTPUT_DIR / "predictions.csv"
 
     if args.skip_predictions and predictions_path.exists():
@@ -359,9 +377,8 @@ def main() -> None:
     # 6. Chip scenarios
     wildcards_used = chips_cfg.get("wildcards_used", 0)
     free_hits_used = chips_cfg.get("free_hits_used", 0)
-    bench_boost_used = chips_cfg.get("bench_boost_used", False)
-    triple_captain_used = chips_cfg.get("triple_captain_used", False)
-    chip_opt = config.get("chip_optimization", {})
+    bench_boost_used = chips_cfg.get("bench_boost_used", 0)
+    triple_captain_used = chips_cfg.get("triple_captain_used", 0)
 
     if args.no_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [],
@@ -370,13 +387,12 @@ def main() -> None:
         chip_scenarios = generate_chip_scenarios(
             start_gw=current_gw,
             planning_horizon=horizon,
-            enable_free_hit=chip_opt.get("enable_free_hit", True),
-            enable_bench_boost=chip_opt.get("enable_bench_boost", True),
-            enable_triple_captain=chip_opt.get("enable_triple_captain", True),
             free_hits_used_first_half=min(free_hits_used, 1),
             free_hits_used_second_half=max(0, free_hits_used - 1),
-            bench_boost_used=bench_boost_used,
-            triple_captain_used=triple_captain_used,
+            bench_boost_used_first_half=min(bench_boost_used, 1),
+            bench_boost_used_second_half=max(0, bench_boost_used - 1),
+            triple_captain_used_first_half=min(triple_captain_used, 1),
+            triple_captain_used_second_half=max(0, triple_captain_used - 1),
         )
 
     max_scenarios = solver_params.get("max_scenarios", 100)

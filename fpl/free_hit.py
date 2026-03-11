@@ -21,98 +21,100 @@ logger = logging.getLogger(__name__)
 CHIP_WINDOWS = {"first_half": (1, 19), "second_half": (20, 38)}
 
 
+def _half_season_chip_options(
+    used_first_half: int,
+    used_second_half: int,
+    first_half_gws: List[int],
+    second_half_gws: List[int],
+) -> List[int]:
+    """
+    Build the list of candidate GWs for a chip that follows the 1-per-half rule.
+
+    Returns:
+        List of GWs where the chip can be used (empty if fully exhausted).
+    """
+    options: List[int] = []
+    if used_first_half < 1:
+        options.extend(first_half_gws)
+    if used_second_half < 1:
+        options.extend(second_half_gws)
+    return options
+
+
 def generate_chip_scenarios(
     start_gw: int,
     planning_horizon: int,
-    enable_free_hit: bool = False,
-    enable_bench_boost: bool = False,
-    enable_triple_captain: bool = False,
     free_hits_used_first_half: int = 0,
     free_hits_used_second_half: int = 0,
-    bench_boost_used: bool = False,
-    triple_captain_used: bool = False,
+    bench_boost_used_first_half: int = 0,
+    bench_boost_used_second_half: int = 0,
+    triple_captain_used_first_half: int = 0,
+    triple_captain_used_second_half: int = 0,
 ) -> List[Dict]:
     """
-    Generate all valid chip combinations as cartesian product of FH x BB x TC options,
-    filtering conflicts (max 1 chip per GW).
+    Generate all valid chip combinations (FH x BB x TC), respecting the
+    1-per-half-season rule for every chip type and the 1-chip-per-GW conflict.
 
-    FH scenarios: No FH always included; single FH per first-half GW if remaining > 0;
-    single FH per second-half GW if remaining > 0; double FH (one from each half) if both.
-    BB options: -1 (disabled) + all GWs in horizon if not used.
-    TC options: -1 (disabled) + all GWs in horizon if not used.
+    All unused chips are always enumerated — there is no enable/disable toggle.
+
+    Args:
+        start_gw: First GW of the planning horizon.
+        planning_horizon: Number of GWs to plan.
+        *_first_half / *_second_half: How many of each chip have been used in
+            GW 1-19 and GW 20-38 respectively (0 or 1).
 
     Returns:
-        List of scenario dicts with: name, free_hit_gws, bench_boost_gw, triple_captain_gw.
-        bench_boost_gw and triple_captain_gw use -1 when disabled.
+        List of scenario dicts with: name, free_hit_gws, bench_boost_gw,
+        triple_captain_gw.  -1 means "chip not used this scenario".
     """
     all_gws = list(range(start_gw, start_gw + planning_horizon))
     first_half_gws = [
-        gw
-        for gw in all_gws
+        gw for gw in all_gws
         if CHIP_WINDOWS["first_half"][0] <= gw <= CHIP_WINDOWS["first_half"][1]
     ]
     second_half_gws = [
-        gw
-        for gw in all_gws
+        gw for gw in all_gws
         if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
     ]
 
+    # --- FH scenarios (can use up to 2: one per half) ---
     remaining_fh_first = max(0, 1 - free_hits_used_first_half)
     remaining_fh_second = max(0, 1 - free_hits_used_second_half)
 
-    # FH scenarios
     fh_scenarios: List[Dict] = [{"name": "No Free Hit", "free_hit_gws": []}]
+    if remaining_fh_first > 0 and first_half_gws:
+        for gw in first_half_gws:
+            fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
+    if remaining_fh_second > 0 and second_half_gws:
+        for gw in second_half_gws:
+            fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
+    if remaining_fh_first > 0 and remaining_fh_second > 0 and first_half_gws and second_half_gws:
+        for gw1 in first_half_gws:
+            for gw2 in second_half_gws:
+                fh_scenarios.append({
+                    "name": f"FH GW{gw1}+{gw2}", "free_hit_gws": [gw1, gw2],
+                })
 
-    if enable_free_hit:
-        if remaining_fh_first > 0 and first_half_gws:
-            for gw in first_half_gws:
-                fh_scenarios.append(
-                    {"name": f"Free Hit GW {gw}", "free_hit_gws": [gw]}
-                )
-        if remaining_fh_second > 0 and second_half_gws:
-            for gw in second_half_gws:
-                fh_scenarios.append(
-                    {"name": f"Free Hit GW {gw}", "free_hit_gws": [gw]}
-                )
-        if (
-            remaining_fh_first > 0
-            and remaining_fh_second > 0
-            and first_half_gws
-            and second_half_gws
-        ):
-            for gw1 in first_half_gws:
-                for gw2 in second_half_gws:
-                    fh_scenarios.append(
-                        {
-                            "name": f"Free Hit GW {gw1} + {gw2}",
-                            "free_hit_gws": [gw1, gw2],
-                        }
-                    )
-
-    # BB options
+    # --- BB options (1-per-half rule) ---
     bb_options: List[int] = [-1]
-    if enable_bench_boost and not bench_boost_used:
-        bb_options.extend(all_gws)
+    bb_options.extend(_half_season_chip_options(
+        bench_boost_used_first_half, bench_boost_used_second_half,
+        first_half_gws, second_half_gws,
+    ))
 
-    # TC options
+    # --- TC options (1-per-half rule) ---
     tc_options: List[int] = [-1]
-    if enable_triple_captain and not triple_captain_used:
-        tc_options.extend(all_gws)
+    tc_options.extend(_half_season_chip_options(
+        triple_captain_used_first_half, triple_captain_used_second_half,
+        first_half_gws, second_half_gws,
+    ))
 
-    # Cartesian product with conflict filter
+    # --- Cartesian product with 1-chip-per-GW conflict filter ---
     scenarios: List[Dict] = []
     for fh in fh_scenarios:
         fh_gws_set = set(fh["free_hit_gws"])
         for bb_gw in bb_options:
             for tc_gw in tc_options:
-                chip_gws = set()
-                if bb_gw != -1:
-                    chip_gws.add(bb_gw)
-                if tc_gw != -1:
-                    chip_gws.add(tc_gw)
-                chip_gws.update(fh_gws_set)
-
-                # Max 1 chip per GW: no overlap
                 if bb_gw != -1 and bb_gw in fh_gws_set:
                     continue
                 if tc_gw != -1 and tc_gw in fh_gws_set:
@@ -122,29 +124,23 @@ def generate_chip_scenarios(
 
                 parts = []
                 if fh["free_hit_gws"]:
-                    parts.append(
-                        " + ".join(f"FH GW{gw}" for gw in fh["free_hit_gws"])
-                    )
+                    parts.append(" + ".join(f"FH GW{gw}" for gw in fh["free_hit_gws"]))
                 if bb_gw != -1:
                     parts.append(f"BB GW{bb_gw}")
                 if tc_gw != -1:
                     parts.append(f"TC GW{tc_gw}")
                 name = " | ".join(parts) if parts else "No chips"
 
-                scenarios.append(
-                    {
-                        "name": name,
-                        "free_hit_gws": list(fh["free_hit_gws"]),
-                        "bench_boost_gw": bb_gw,
-                        "triple_captain_gw": tc_gw,
-                    }
-                )
+                scenarios.append({
+                    "name": name,
+                    "free_hit_gws": list(fh["free_hit_gws"]),
+                    "bench_boost_gw": bb_gw,
+                    "triple_captain_gw": tc_gw,
+                })
 
     logger.info(
         "Generated %d chip scenarios for GW %d-%d",
-        len(scenarios),
-        start_gw,
-        start_gw + planning_horizon - 1,
+        len(scenarios), start_gw, start_gw + planning_horizon - 1,
     )
     return scenarios
 

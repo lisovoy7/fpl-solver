@@ -28,12 +28,6 @@ _DEFAULT_SOLVER = {
     "max_scenarios": 100,
 }
 
-_DEFAULT_CHIP_OPTIMIZATION = {
-    "enable_free_hit": True,
-    "enable_bench_boost": True,
-    "enable_triple_captain": True,
-}
-
 _DEFAULT_TRANSFER_TOPUP = {
     "enabled": True,
     "trigger_gw": 15,
@@ -76,10 +70,6 @@ def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
         config["solver"] = {}
     config["solver"] = {**_DEFAULT_SOLVER, **config["solver"]}
 
-    if "chip_optimization" not in config:
-        config["chip_optimization"] = {}
-    config["chip_optimization"] = {**_DEFAULT_CHIP_OPTIMIZATION, **config["chip_optimization"]}
-
     if "transfer_topup" not in config:
         config["transfer_topup"] = {}
     config["transfer_topup"] = {**_DEFAULT_TRANSFER_TOPUP, **config["transfer_topup"]}
@@ -87,7 +77,8 @@ def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     if "chips" not in config:
         config["chips"] = {}
 
-    for key in ("non_playing", "forced_lineup", "points_multiplier", "excluded_players", "extra_players"):
+    for key in ("non_playing", "forced_lineup", "points_multiplier",
+                "excluded_players", "extra_players", "fixture_overrides"):
         if key not in config:
             config[key] = []
 
