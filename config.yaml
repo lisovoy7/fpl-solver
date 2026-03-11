@@ -1,0 +1,101 @@
+# ============================================================================
+# fpl-solver configuration
+# ============================================================================
+# This is the only file you need to edit before running the solver.
+# See README.md for full documentation.
+
+# ---------- Required ----------
+
+# Your FPL team ID (from your team URL: fantasy.premierleague.com/entry/YOUR_ID/)
+team_id: 4514531
+
+# Free transfers available right now. Must be set manually because the FPL API
+# does not reliably expose pending free transfers.
+free_transfers: 1
+
+# ---------- Auto-detected (override only if needed) ----------
+
+# Current gameweek is auto-detected from the FPL API.
+# Uncomment to override:
+# current_gw: 27
+
+# ---------- Solver parameters ----------
+
+solver:
+  # "rest_of_season" or an integer (e.g. 5 for 5-GW horizon)
+  planning_horizon: rest_of_season
+
+  # Minimum 60+ minute games a player must have to enter the watchlist.
+  # Lower = more players (less reliable). Higher = fewer players (more reliable).
+  min_hist_games: 7
+
+  # Probability that each starting-XI player won't play (rotation/injury).
+  # 0.10 means ~1.1 expected subs per GW. Set to 0.0 to ignore bench value.
+  sub_probability: 0.10
+
+  # Artificial penalty per transfer in GW1 of the planning horizon.
+  # Discourages the solver from front-loading transfers.  -1 = mild penalty.
+  first_gw_transfer_penalty: -1
+
+  # Solver time limit in seconds per chip scenario.
+  time_limit_per_scenario: 15
+
+  # Maximum chip scenarios to test (caps combinatorial explosion).
+  max_scenarios: 100
+
+# ---------- Chip usage state ----------
+# Auto-detected from FPL API if omitted. Override here if detection is wrong.
+
+chips:
+  wildcards_used: 1        # 0, 1, or 2 (one per half-season)
+  free_hits_used: 1        # 0, 1, or 2 (one per half-season)
+  bench_boost_used: false   # true if already used this season
+  triple_captain_used: false
+
+# ---------- Chip optimization toggles ----------
+
+chip_optimization:
+  enable_free_hit: true
+  enable_bench_boost: true
+  enable_triple_captain: true
+
+# ---------- Transfer top-up rule ----------
+# After trigger_gw, the solver allows up to transfer_count free transfers
+# (models mid-season squad refresh e.g. AFCON window).
+
+transfer_topup:
+  enabled: true
+  trigger_gw: 15
+  transfer_count: 5
+
+# ---------- Player overrides ----------
+# DISCLAIMER: The FPL API does NOT reflect pending transfers. Squad data is
+# always based on the last completed gameweek. Injuries, suspensions, and
+# expected absences must be entered manually below.
+
+# Players who won't play in specific gameweeks (injury, suspension, etc.)
+# Solver sets their points to 0 but may keep them in the squad.
+non_playing: []
+  # - player: 661     # Ekitike
+  #   gameweeks: [21, 22]
+  # - player: 441     # Dorgu
+  #   gameweeks: [25, 26, 27, 28]
+
+# Players forced into the starting lineup in specific gameweeks.
+forced_lineup: []
+  # - player: 235     # Palmer
+  #   gameweeks: [27]
+
+# Adjust predicted points for specific players (across all gameweeks).
+# multiplier > 1.0 = boost, < 1.0 = reduce.
+points_multiplier: []
+  # - player: 235
+  #   multiplier: 1.5
+
+# Player IDs to always exclude from the watchlist (e.g. non-differentials).
+excluded_players: []
+  # - 5    # Gabriel
+
+# Extra player IDs to always include in the watchlist (beyond current squad).
+extra_players: []
+  # - 256  # Munoz

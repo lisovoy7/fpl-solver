@@ -1,0 +1,174 @@
+"""
+YAML config loader for the fpl-solver project.
+
+Loads config.yaml from the project root, applies sensible defaults for optional
+fields, validates required fields (team_id, free_transfers), and provides helpers
+to extract solver params and player overrides in the format expected by the solver.
+Supports merging auto-detected values (current_gw, chips_used) from the FPL API.
+"""
+
+import logging
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# Project root: parent of fpl/ package (same level as run.py)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Default values for optional config sections
+_DEFAULT_SOLVER = {
+    "planning_horizon": "rest_of_season",
+    "min_hist_games": 7,
+    "sub_probability": 0.10,
+    "first_gw_transfer_penalty": -1,
+    "time_limit_per_scenario": 15,
+    "max_scenarios": 100,
+}
+
+_DEFAULT_CHIP_OPTIMIZATION = {
+    "enable_free_hit": True,
+    "enable_bench_boost": True,
+    "enable_triple_captain": True,
+}
+
+_DEFAULT_TRANSFER_TOPUP = {
+    "enabled": True,
+    "trigger_gw": 15,
+    "transfer_count": 5,
+}
+
+
+def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
+    """
+    Load config from YAML file at project root.
+
+    Args:
+        config_path: Path to config file, relative to project root.
+
+    Returns:
+        Merged config dict with defaults applied.
+
+    Raises:
+        FileNotFoundError: If config file does not exist.
+        ValueError: If required fields (team_id, free_transfers) are missing.
+    """
+    full_path = _PROJECT_ROOT / config_path
+    if not full_path.exists():
+        raise FileNotFoundError(f"Config file not found: {full_path}")
+
+    with open(full_path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    config = _apply_defaults(raw)
+    _validate_required(config)
+    logger.info("Loaded config from %s", full_path)
+    return config
+
+
+def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
+    """Merge raw config with defaults for optional sections."""
+    config = dict(raw)
+
+    if "solver" not in config:
+        config["solver"] = {}
+    config["solver"] = {**_DEFAULT_SOLVER, **config["solver"]}
+
+    if "chip_optimization" not in config:
+        config["chip_optimization"] = {}
+    config["chip_optimization"] = {**_DEFAULT_CHIP_OPTIMIZATION, **config["chip_optimization"]}
+
+    if "transfer_topup" not in config:
+        config["transfer_topup"] = {}
+    config["transfer_topup"] = {**_DEFAULT_TRANSFER_TOPUP, **config["transfer_topup"]}
+
+    if "chips" not in config:
+        config["chips"] = {}
+
+    for key in ("non_playing", "forced_lineup", "points_multiplier", "excluded_players", "extra_players"):
+        if key not in config:
+            config[key] = []
+
+    return config
+
+
+def _validate_required(config: dict[str, Any]) -> None:
+    """Validate that required fields are present."""
+    if "team_id" not in config:
+        raise ValueError("Required field 'team_id' is missing from config")
+    if "free_transfers" not in config:
+        raise ValueError("Required field 'free_transfers' is missing from config")
+
+
+def merge_api_values(config: dict[str, Any], current_gw: int | None = None, chips: dict[str, Any] | None = None) -> None:
+    """
+    Merge auto-detected values from FPL API into config (in-place).
+
+    Args:
+        config: Config dict to update.
+        current_gw: Current gameweek from API, if detected.
+        chips: Chip usage from API, e.g. {"wildcards_used": 1, "free_hits_used": 1, ...}
+    """
+    if current_gw is not None and "current_gw" not in config:
+        config["current_gw"] = current_gw
+        logger.debug("Merged current_gw=%s from API", current_gw)
+
+    if chips and "chips" in config:
+        for key, value in chips.items():
+            if key not in config["chips"] or config["chips"][key] is None:
+                config["chips"][key] = value
+        logger.debug("Merged chips from API: %s", chips)
+
+
+def get_solver_params(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Extract solver parameters from config.
+
+    Args:
+        config: Full config dict from load_config.
+
+    Returns:
+        Solver params dict.
+    """
+    return dict(config.get("solver", _DEFAULT_SOLVER))
+
+
+def get_player_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert YAML player override format to tuple format used by the solver.
+
+    Args:
+        config: Full config dict from load_config.
+
+    Returns:
+        Dict with keys: non_playing, forced_lineup, points_multiplier,
+        excluded_players, extra_players. List fields use (player_id, gw_list)
+        or (player_id, multiplier) tuples as appropriate.
+    """
+    def to_non_playing_tuples(items: list) -> list[tuple[int, list[int]]]:
+        result = []
+        for item in items:
+            pid = item.get("player") or item.get("id")
+            gws = item.get("gameweeks", [])
+            if pid is not None:
+                result.append((int(pid), list(gws)))
+        return result
+
+    def to_points_multiplier_tuples(items: list) -> list[tuple[int, float]]:
+        result = []
+        for item in items:
+            pid = item.get("player") or item.get("id")
+            mult = item.get("multiplier", 1.0)
+            if pid is not None:
+                result.append((int(pid), float(mult)))
+        return result
+
+    return {
+        "non_playing": to_non_playing_tuples(config.get("non_playing", [])),
+        "forced_lineup": to_non_playing_tuples(config.get("forced_lineup", [])),
+        "points_multiplier": to_points_multiplier_tuples(config.get("points_multiplier", [])),
+        "excluded_players": [int(p) for p in config.get("excluded_players", [])],
+        "extra_players": [int(p) for p in config.get("extra_players", [])],
+    }
