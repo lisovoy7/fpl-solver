@@ -11,7 +11,7 @@ team_id: 4514531
 
 # Free transfers available right now. Must be set manually because the FPL API
 # does not reliably expose pending free transfers.
-free_transfers: 1
+free_transfers: 3
 
 # ---------- Auto-detected (override only if needed) ----------
 
