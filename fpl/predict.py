@@ -115,6 +115,11 @@ def _normalize_stats(
 
     merged["is_home"] = merged["was_home"].astype(int)
 
+    # Cast normalizable components to numeric (API sometimes returns strings)
+    for col in NORMALIZABLE_COMPONENTS:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+
     # Normalize each component
     merge_keys = ["position", "player_team_tier", "opponent_team_tier", "is_home"]
     for component in NORMALIZABLE_COMPONENTS:
@@ -166,6 +171,9 @@ def _calculate_player_averages(
 
     gw_filtered = gw_data[gw_data["minutes"] >= MIN_MINUTES].copy()
     gw_filtered["kickoff_time"] = pd.to_datetime(gw_filtered["kickoff_time"])
+    for col in ["defensive_contribution", "bonus", "yellow_cards"]:
+        if col in gw_filtered.columns:
+            gw_filtered[col] = pd.to_numeric(gw_filtered[col], errors="coerce").fillna(0)
     stats_sorted = normalized_stats.sort_values(["element", "kickoff_time"])
 
     records = []
