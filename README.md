@@ -56,28 +56,88 @@ First run takes a few minutes because it fetches per-player stats from the FPL A
 
 ## Configuration Reference
 
-All parameters live in `config.yaml`. The only **required** fields are:
+All parameters live in `config.yaml`. Below is a complete reference for every parameter.
 
-| Field | Type | Description |
+### Required Parameters
+
+| Parameter | Type | Description |
 |---|---|---|
-| `team_id` | int | Your FPL team ID (from your team URL) |
-| `free_transfers` | int | Free transfers available right now |
+| `team_id` | int | Your FPL team ID. Find it in your team URL: `fantasy.premierleague.com/entry/YOUR_ID/` |
+| `free_transfers` | int | Free transfers you currently have available. Must be set manually — the FPL API does not reliably expose this value |
 
-Everything else has sensible defaults or is auto-detected from the FPL API. See `config.yaml` for the full annotated reference.
+### Auto-detected Parameters
 
-### Auto-detected Values
+These are fetched from the FPL API at runtime. You only need to set them if auto-detection gives the wrong result.
 
-| Value | Source | Override in config |
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `current_gw` | int | auto | The upcoming gameweek (first GW whose deadline hasn't passed). Uncomment to override |
+
+### Solver Parameters
+
+Control how the MILP optimization behaves. All have sensible defaults.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `solver.planning_horizon` | int or `"rest_of_season"` | `rest_of_season` | How many GWs ahead to plan. `rest_of_season` plans through GW 38. An integer like `5` plans a short horizon (faster, useful for testing) |
+| `solver.min_hist_games` | int | `7` | Minimum number of 60+ minute appearances a player must have this season to enter the candidate pool. Lower values include more players but with less reliable stats. Higher values are more conservative |
+| `solver.sub_probability` | float | `0.10` | Probability that each starting-XI player won't play on any given GW (rotation risk). This determines how much bench value matters. `0.10` means ~1.1 expected substitutions per GW. Set to `0.0` to ignore bench value entirely |
+| `solver.first_gw_transfer_penalty` | float | `-1` | Artificial points penalty per transfer made in the first GW of the horizon. Prevents the solver from making transfers that only look good because GW 1 is the most "certain" in the plan. Negative value = mild penalty |
+| `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. Increase if solutions are suboptimal (solver reports gap > 0) |
+| `solver.max_scenarios` | int | `100` | Cap on total chip scenarios to evaluate. Prevents combinatorial explosion when many chips are unused and the horizon is long |
+
+### Chip Usage State
+
+How many times each chip has been used this season. Auto-detected from the FPL API if omitted. All four chip types follow the same rule: **one per half-season** (GW 1-19 and GW 20-38), so each can be 0, 1, or 2. The solver automatically enumerates all unused chips — there are no enable/disable toggles.
+
+If you set a value here, it overrides the API detection. If you omit a value (or set it to `null`), the API-detected count is used.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `chips.wildcards_used` | int (0-2) | auto | How many Wildcards have been used. 1 = first-half used, 2 = both halves used |
+| `chips.free_hits_used` | int (0-2) | auto | How many Free Hits have been used |
+| `chips.bench_boost_used` | int (0-2) | auto | How many Bench Boosts have been used |
+| `chips.triple_captain_used` | int (0-2) | auto | How many Triple Captains have been used |
+
+### Transfer Top-up
+
+Models a mid-season transfer window (e.g. AFCON, injury crisis) where the solver is allowed extra free transfers at a specific GW.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `transfer_topup.enabled` | bool | `true` | Whether the top-up rule is active |
+| `transfer_topup.trigger_gw` | int | `15` | The GW at which extra transfers become available |
+| `transfer_topup.transfer_count` | int | `5` | Number of extra free transfers granted at `trigger_gw` |
+
+### Fixture Overrides
+
+Override the gameweek assignment of specific fixtures. Use this when the Premier League reschedules matches (postponements, double gameweeks, blank gameweeks) and the FPL API hasn't been updated yet. Each entry moves a fixture (identified by home and away team IDs) to a new GW. Team IDs can be found in `data/team_tiers.csv`.
+
+| Parameter | Type | Description |
 |---|---|---|
-| Current gameweek | First event with deadline > now | `current_gw` |
-| Chips used | Team history endpoint | `chips` section |
-| Current season | Bootstrap data | (not overridable) |
+| `fixture_overrides[].home_team` | int | FPL team ID of the home side |
+| `fixture_overrides[].away_team` | int | FPL team ID of the away side |
+| `fixture_overrides[].gameweek` | int | New GW number for this fixture |
+
+```yaml
+fixture_overrides:
+  # Arsenal (1) vs Newcastle (15) rescheduled to GW 33 (double gameweek)
+  - home_team: 1
+    away_team: 15
+    gameweek: 33
+  # Brighton (6) vs Chelsea (7) moved to GW 33
+  - home_team: 6
+    away_team: 7
+    gameweek: 33
+```
 
 ### Player Overrides
 
-These let you inject domain knowledge the model can't detect on its own.
+These let you inject domain knowledge the model can't detect on its own. The FPL API does NOT reflect transfers you've already made for the upcoming gameweek, and it has no injury/suspension data. Use these overrides to correct for that.
 
-**`non_playing`** — Players who won't play in specific GWs (injury, suspension, rotation). The solver sets their points to 0 but may keep them in the squad if it expects them back later.
+#### `non_playing`
+
+Players who won't play in specific GWs (injury, suspension, rotation). The solver sets their expected points to 0 for those GWs but may keep them in the squad if it expects them back later.
 
 ```yaml
 non_playing:
@@ -87,7 +147,9 @@ non_playing:
     gameweeks: [30]
 ```
 
-**`forced_lineup`** — Force specific players into the starting XI for specific GWs. Use when you have strong conviction or want to lock a differential.
+#### `forced_lineup`
+
+Force specific players into the starting XI for specific GWs. Use when you have strong conviction or want to lock a differential.
 
 ```yaml
 forced_lineup:
@@ -95,7 +157,9 @@ forced_lineup:
     gameweeks: [30, 31]
 ```
 
-**`points_multiplier`** — Scale a player's predicted points up or down across all GWs. Useful when you believe the model under/over-estimates a player (e.g. a new signing with little history).
+#### `points_multiplier`
+
+Scale a player's predicted points up or down across all GWs. Useful when you believe the model under/over-estimates a player (e.g. a new signing with little history, or a player whose form has clearly shifted).
 
 ```yaml
 points_multiplier:
@@ -105,7 +169,9 @@ points_multiplier:
     multiplier: 0.7
 ```
 
-**`excluded_players`** — Player IDs to permanently remove from the optimization pool.
+#### `excluded_players`
+
+Player IDs to permanently remove from the candidate pool. The solver will never consider buying or owning these players.
 
 ```yaml
 excluded_players:
@@ -113,30 +179,14 @@ excluded_players:
   - 237    # Enzo
 ```
 
-**`extra_players`** — Player IDs to always include in the pool (beyond your current squad). Use for transfer targets.
+#### `extra_players`
+
+Player IDs to force into the candidate pool even if they don't meet the `min_hist_games` threshold. By default, a player needs at least `min_hist_games` appearances of 60+ minutes to be considered. Use `extra_players` to bypass this filter for players you trust despite limited game time — e.g. new signings, returning-from-injury players, or promising players who've only recently broken into the starting XI.
 
 ```yaml
 extra_players:
-  - 256    # Munoz
-  - 267    # Sarr
-```
-
-### Fixture Overrides (DGW / BGW)
-
-When the Premier League reschedules fixtures (postponements, double gameweeks, blank gameweeks), the FPL API may not be updated immediately. Use `fixture_overrides` to manually correct the schedule before running the solver.
-
-Each entry moves a specific fixture (identified by home and away team IDs) to a new gameweek. Team IDs can be found in `data/team_tiers.csv`.
-
-```yaml
-fixture_overrides:
-  # Arsenal (1) vs Chelsea (7) postponed, rescheduled to GW 33
-  - home_team: 1
-    away_team: 7
-    gameweek: 33
-  # Liverpool (12) vs Man City (13) moved to GW 29 (double gameweek)
-  - home_team: 12
-    away_team: 13
-    gameweek: 29
+  - 256    # Munoz — new signing, only 3 starts but looks strong
+  - 267    # Sarr — returning from injury, want solver to consider him
 ```
 
 ## Output

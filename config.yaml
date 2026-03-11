@@ -2,7 +2,7 @@
 # fpl-solver configuration
 # ============================================================================
 # This is the only file you need to edit before running the solver.
-# See README.md for full documentation.
+# See README.md for full documentation of every parameter.
 
 # ---------- Required ----------
 
@@ -25,7 +25,7 @@ solver:
   # "rest_of_season" or an integer (e.g. 5 for 5-GW horizon)
   planning_horizon: rest_of_season
 
-  # Minimum 60+ minute games a player must have to enter the watchlist.
+  # Minimum 60+ minute games a player must have to enter the candidate pool.
   # Lower = more players (less reliable). Higher = fewer players (more reliable).
   min_hist_games: 7
 
@@ -71,11 +71,22 @@ transfer_topup:
 # Each entry needs: home_team (team_id), away_team (team_id), gameweek (new GW).
 # Find team IDs in data/team_tiers.csv.
 
-fixture_overrides: []
-  # Example: move Arsenal (1) vs Chelsea (7) to GW 29 (double gameweek)
-  # - home_team: 1
-  #   away_team: 7
-  #   gameweek: 29
+fixture_overrides:
+  - home_team: 1       # Arsenal
+    away_team: 15      # Newcastle
+    gameweek: 33
+  - home_team: 6       # Brighton
+    away_team: 7       # Chelsea
+    gameweek: 33
+  - home_team: 19      # West Ham
+    away_team: 9       # Everton
+    gameweek: 33
+  - home_team: 3       # Burnley
+    away_team: 13      # Man City
+    gameweek: 33
+  - home_team: 13      # Man City
+    away_team: 8       # Crystal Palace
+    gameweek: 37
 
 # ---------- Player overrides ----------
 # DISCLAIMER: The FPL API does NOT reflect transfers you've already made for the
@@ -104,12 +115,13 @@ points_multiplier: []
   # - player: 235     # Palmer
   #   multiplier: 1.5
 
-# Player IDs to always exclude from the optimization pool.
+# Player IDs to always exclude from the candidate pool.
 # Use for players you never want to own (non-differentials, personal preference).
 excluded_players: []
   # - 5    # Gabriel
 
-# Extra player IDs to always include in the optimization pool
-# (beyond your current squad). Use for transfer targets you're watching.
+# Extra player IDs to force into the candidate pool even if they have fewer
+# appearances than min_hist_games.  Use for new signings, returning-from-injury
+# players, or anyone you trust despite limited game time this season.
 extra_players: []
-  # - 256  # Munoz
+  # - 256  # Munoz — new signing, only 3 starts
