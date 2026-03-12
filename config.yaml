@@ -27,7 +27,12 @@ solver:
 
   # Minimum 60+ minute games a player must have to enter the candidate pool.
   # Lower = more players (less reliable). Higher = fewer players (more reliable).
-  min_hist_games: 7
+  min_hist_games: 4
+
+  # Only count appearances from the last N gameweeks when checking min_hist_games.
+  # Ensures players who haven't featured recently are filtered out even if they
+  # have enough total appearances across the season.
+  min_hist_window: 6
 
   # Probability that each starting-XI player won't play (rotation/injury).
   # 0.10 means ~1.1 expected subs per GW. Set to 0.0 to ignore bench value.
@@ -38,10 +43,10 @@ solver:
   first_gw_transfer_penalty: -1
 
   # Solver time limit in seconds per chip scenario.
-  time_limit_per_scenario: 15
+  time_limit_per_scenario: 30
 
   # Maximum chip scenarios to test (caps combinatorial explosion).
-  max_scenarios: 100
+  max_scenarios: 1000
 
 # ---------- Chip usage state ----------
 # Auto-detected from FPL API if omitted. Override here if detection is wrong.
@@ -54,6 +59,14 @@ chips:
   free_hits_used: 1        # 0, 1, or 2 (one per half-season)
   bench_boost_used: 1      # 0, 1, or 2 (one per half-season)
   triple_captain_used: 2   # 0, 1, or 2 (one per half-season)
+
+  # Force a chip on a specific GW. When set, the solver pins that chip to the
+  # given GW and skips iterating over other options — much faster optimization.
+  # Omit or set to null to let the solver decide the best GW for each chip.
+  # force_free_hit_gw: 33
+  # force_bench_boost_gw: 37
+  # # force_triple_captain_gw: 34
+  # force_wildcard_gw: 32
 
 # ---------- Transfer top-up rule ----------
 # After trigger_gw, the solver allows up to transfer_count free transfers
@@ -75,18 +88,18 @@ fixture_overrides:
   - home_team: 1       # Arsenal
     away_team: 15      # Newcastle
     gameweek: 33
-  - home_team: 6       # Brighton
-    away_team: 7       # Chelsea
-    gameweek: 33
-  - home_team: 19      # West Ham
-    away_team: 9       # Everton
-    gameweek: 33
-  - home_team: 3       # Burnley
-    away_team: 13      # Man City
-    gameweek: 33
+  # - home_team: 6       # Brighton
+  #   away_team: 7       # Chelsea
+  #   gameweek: 33
+  # - home_team: 19      # West Ham
+  #   away_team: 9       # Everton
+  #   gameweek: 33
+  # - home_team: 3       # Burnley
+  #   away_team: 13      # Man City
+  #   gameweek: 33
   - home_team: 13      # Man City
     away_team: 8       # Crystal Palace
-    gameweek: 37
+    gameweek: 33
 
 # ---------- Player overrides ----------
 # DISCLAIMER: The FPL API does NOT reflect transfers you've already made for the

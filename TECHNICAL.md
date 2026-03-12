@@ -354,8 +354,8 @@ These are handled **outside** the main MILP via **scenario enumeration** (see be
 
 Free Hit GWs are also determined by scenario enumeration. For a FH GW:
 1. All player points in the main solver are set to 0 for that GW.
-2. Transfer penalties are set to -1000 (effectively blocking transfers).
-3. Transfer banking is preserved across the FH GW (as if it didn't happen).
+2. **Squad is frozen**: transfer-in and transfer-out variables are forced to 0 for all players, ensuring the real squad flows through the FH GW unchanged (matching FPL's revert-after-FH rule).
+3. Transfer banking is preserved across the FH GW (available transfers carry through).
 4. A **separate MILP** (`fpl/free_hit.py`) solves the optimal squad from scratch for that single GW, subject to budget and composition constraints. The FH points are added to the main solver's total afterwards.
 
 ### Free Hit Sub-Problem
@@ -392,6 +392,8 @@ Since chip decisions (when to play FH, BB, TC) are discrete choices that interac
 
 Each scenario is solved independently by the main MILP solver. The scenario with the highest total expected points (solver objective + FH benefits) wins.
 
+**Forced chip GWs:** When `force_free_hit_gw`, `force_bench_boost_gw`, `force_triple_captain_gw`, or `force_wildcard_gw` is set in config, that chip is pinned to the specified GW and no other options are enumerated for it. This dramatically reduces the scenario count (e.g. from ~90 to ~9 when FH is pinned and TC is exhausted). For Wildcard, the solver adds a hard constraint forcing the wildcard decision variable to 1 on the specified GW and 0 elsewhere.
+
 **Complexity control:** The `max_scenarios` config param (default: 100) caps the number of scenarios tested. For a 9-GW horizon with all chips available, this typically produces 50-90 scenarios.
 
 ---
@@ -408,7 +410,7 @@ The full pipeline executed by `python run.py`:
 4. **Fetch fixtures** — all 380 PL fixtures. Apply `fixture_overrides` from config (DGW/BGW corrections).
 5. **Fetch GW data** — per-player per-GW stats for all ~820 players (this is the slow step, ~2-3 minutes).
 6. **Generate predictions** — run the prediction engine (Steps 1-4 above).
-7. **Build watchlist** — filter players by `min_hist_games`, apply `must_include`/`must_exclude`.
+7. **Build watchlist** — filter players by `min_hist_games` within the last `min_hist_window` GWs, apply `must_include`/`must_exclude`.
 8. **Enumerate chip scenarios** — generate all valid chip combinations.
 9. **Pre-calculate Free Hit benefits** — solve the FH sub-problem for every GW in the horizon.
 10. **Solve each scenario** — for each chip scenario, create and solve the main MILP. Track the best solution.

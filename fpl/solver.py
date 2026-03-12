@@ -61,6 +61,7 @@ class FPLSolver:
         sub_probability: float = 0.0,
         bench_boost_gw: int = -1,
         triple_captain_gw: int = -1,
+        force_wildcard_gw: Optional[int] = None,
     ):
         """
         Initialize the FPL solver.
@@ -81,6 +82,7 @@ class FPLSolver:
             sub_probability: Probability lineup players won't play (bench valuation).
             bench_boost_gw: Gameweek for Bench Boost chip (-1 = disabled).
             triple_captain_gw: Gameweek for Triple Captain chip (-1 = disabled).
+            force_wildcard_gw: Force wildcard on this GW (None = let solver decide).
         """
         self.T = planning_horizon
         self.budget = budget
@@ -97,6 +99,7 @@ class FPLSolver:
         self.sub_probability = sub_probability
         self.bench_boost_gw = bench_boost_gw
         self.triple_captain_gw = triple_captain_gw
+        self.force_wildcard_gw = force_wildcard_gw
 
         self.players = None
         self.predictions = None
@@ -440,6 +443,12 @@ class FPLSolver:
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
 
+        fh_internal_gws = {
+            gw - self.start_gw + 1
+            for gw in self.free_hit_gws
+            if 1 <= gw - self.start_gw + 1 <= self.T
+        }
+
         for p in players:
             initial_owns = 1 if p in self.initial_squad else 0
             self.prob += (
@@ -454,6 +463,16 @@ class FPLSolver:
                     == self.variables['x'][(p, t - 1)] + self.variables['s'][(p, t)] - self.variables['r'][(p, t)],
                     f"Squad_Flow_{p}_{t}",
                 )
+
+        # Free Hit GWs: freeze the real squad — no transfers in or out.
+        # The FH sub-problem picks an independent optimal squad for that GW.
+        if fh_internal_gws:
+            logger.info("Freezing squad flow for Free Hit GWs: %s", sorted(
+                self.start_gw + t - 1 for t in fh_internal_gws))
+            for t in fh_internal_gws:
+                for p in players:
+                    self.prob += (self.variables['s'][(p, t)] == 0, f"FH_No_In_{p}_{t}")
+                    self.prob += (self.variables['r'][(p, t)] == 0, f"FH_No_Out_{p}_{t}")
 
         for t in gameweeks:
             self.prob += (
@@ -724,6 +743,22 @@ class FPLSolver:
                 pulp.lpSum([self.variables['wildcard'][t] for t in second_half_gws]) <= remaining_wc_second,
                 "Max_Wildcard_Second_Half",
             )
+
+        # Force wildcard on a specific GW if requested
+        if self.force_wildcard_gw is not None:
+            wc_internal = self.force_wildcard_gw - self.start_gw + 1
+            if 1 <= wc_internal <= self.T:
+                self.prob += (
+                    self.variables['wildcard'][wc_internal] == 1,
+                    f"Force_Wildcard_GW{self.force_wildcard_gw}",
+                )
+                for t in gameweeks:
+                    if t != wc_internal:
+                        self.prob += (
+                            self.variables['wildcard'][t] == 0,
+                            f"No_Wildcard_Other_GW{self.start_gw + t - 1}",
+                        )
+                logger.info("  Wildcard forced on GW %d", self.force_wildcard_gw)
 
         if self.bench_boost_gw > 0:
             bb_internal = self.bench_boost_gw - self.start_gw + 1

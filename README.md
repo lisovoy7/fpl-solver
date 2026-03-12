@@ -53,6 +53,12 @@ First run takes a few minutes because it fetches per-player stats from the FPL A
 | `--horizon N` | Override planning horizon (default: rest of season) |
 | `--no-chips` | Disable chip optimization (faster, no FH/BB/TC) |
 | `--config PATH` | Use a different config file |
+| `--output-suffix SUFFIX` | Append suffix to output filenames (e.g. `strategy_gw30_SUFFIX.txt`). Useful for running multiple experiments without overwriting results |
+| `--extra-override H:A:GW` | Additional fixture override (repeatable). Moves the fixture between home team H and away team A to gameweek GW. Example: `--extra-override 1:3:36 --extra-override 2:12:36` |
+| `--force-wildcard-gw GW` | Force Wildcard on a specific GW (overrides config) |
+| `--force-free-hit-gw GW` | Force Free Hit on a specific GW (overrides config) |
+| `--force-bench-boost-gw GW` | Force Bench Boost on a specific GW (overrides config) |
+| `--time-limit SECS` | Override solver time limit per scenario (overrides config) |
 
 ## Configuration Reference
 
@@ -80,7 +86,8 @@ Control how the MILP optimization behaves. All have sensible defaults.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `solver.planning_horizon` | int or `"rest_of_season"` | `rest_of_season` | How many GWs ahead to plan. `rest_of_season` plans through GW 38. An integer like `5` plans a short horizon (faster, useful for testing) |
-| `solver.min_hist_games` | int | `7` | Minimum number of 60+ minute appearances a player must have this season to enter the candidate pool. Lower values include more players but with less reliable stats. Higher values are more conservative |
+| `solver.min_hist_games` | int | `7` | Minimum number of 60+ minute appearances a player must have to enter the candidate pool. Only games within the `min_hist_window` are counted |
+| `solver.min_hist_window` | int | `10` | Only count appearances from the last N gameweeks when checking `min_hist_games`. Ensures players who haven't featured recently are filtered out even if they have enough total appearances across the season |
 | `solver.sub_probability` | float | `0.10` | Probability that each starting-XI player won't play on any given GW (rotation risk). This determines how much bench value matters. `0.10` means ~1.1 expected substitutions per GW. Set to `0.0` to ignore bench value entirely |
 | `solver.first_gw_transfer_penalty` | float | `-1` | Artificial points penalty per transfer made in the first GW of the horizon. Prevents the solver from making transfers that only look good because GW 1 is the most "certain" in the plan. Negative value = mild penalty |
 | `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. Increase if solutions are suboptimal (solver reports gap > 0) |
@@ -100,6 +107,27 @@ If you set a value here, it overrides the API detection. If you omit a value (or
 | `chips.triple_captain_used` | int (0-2) | auto | How many Triple Captains have been used |
 
 **Tip:** If you're running a short planning horizon and want to save a chip for later (beyond the horizon window), set it to `2` to make it unavailable to the solver. This also significantly speeds up optimization since it eliminates that chip's scenarios from the enumeration.
+
+### Forced Chip Gameweeks
+
+Pin a specific chip to a specific GW. When set, the solver uses that chip on exactly that GW and **skips enumerating other options** for it — dramatically reducing the number of scenarios and speeding up optimization. Omit or set to `null` to let the solver decide.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `chips.force_free_hit_gw` | int or null | `null` | Force Free Hit on this GW |
+| `chips.force_bench_boost_gw` | int or null | `null` | Force Bench Boost on this GW |
+| `chips.force_triple_captain_gw` | int or null | `null` | Force Triple Captain on this GW |
+| `chips.force_wildcard_gw` | int or null | `null` | Force Wildcard on this GW |
+
+```yaml
+chips:
+  force_free_hit_gw: 33        # Pin FH to DGW33
+  force_bench_boost_gw: 32     # Pin BB to GW32
+  # force_triple_captain_gw: null  # Let solver decide
+  # force_wildcard_gw: null        # Let solver decide
+```
+
+**Example**: If you know GW 33 is a Double Gameweek and you want to use Free Hit there, set `force_free_hit_gw: 33`. The solver will only generate scenarios with FH on GW 33, instead of testing FH on every eligible GW.
 
 ### Transfer Top-up
 

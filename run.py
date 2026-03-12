@@ -46,6 +46,19 @@ def parse_args() -> argparse.Namespace:
                         help="Disable chip optimization (no FH/BB/TC enumeration)")
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="Path to config file")
+    parser.add_argument("--output-suffix", type=str, default="",
+                        help="Suffix appended to output filenames (e.g. 'ars_liv')")
+    parser.add_argument("--extra-override", action="append", default=[],
+                        metavar="HOME:AWAY:GW",
+                        help="Additional fixture override (repeatable). Format: home_id:away_id:new_gw")
+    parser.add_argument("--force-wildcard-gw", type=int, default=None,
+                        help="Force wildcard on a specific GW (CLI override)")
+    parser.add_argument("--force-free-hit-gw", type=int, default=None,
+                        help="Force free hit on a specific GW (CLI override)")
+    parser.add_argument("--force-bench-boost-gw", type=int, default=None,
+                        help="Force bench boost on a specific GW (CLI override)")
+    parser.add_argument("--time-limit", type=int, default=None,
+                        help="Override solver time limit per scenario (seconds)")
     return parser.parse_args()
 
 
@@ -122,6 +135,27 @@ def _build_strategy_text(
         is_tc = "triple_captain" in chips
         is_wc = "wildcard" in chips
 
+        # Calculate GW total expected points
+        gw_total_pts = 0.0
+        if is_fh and fh_benefits and gw in fh_benefits:
+            gw_total_pts = fh_benefits[gw].get("total_points", 0)
+        elif squad_ids:
+            for pid in lineup_ids:
+                pts = expected_points.get((pid, gw), 0)
+                if any(pid == p and gw in gws for p, gws in non_playing):
+                    pts = 0
+                gw_total_pts += pts
+                if pid == captain_id:
+                    mult_factor = 2 if is_tc else 1
+                    gw_total_pts += pts * mult_factor
+            if is_bb:
+                bench_ids = [p for p in squad_ids if p not in lineup_ids]
+                for pid in bench_ids:
+                    pts = expected_points.get((pid, gw), 0)
+                    if any(pid == p and gw in gws for p, gws in non_playing):
+                        pts = 0
+                    gw_total_pts += pts
+
         # GW header
         chip_badges = []
         if is_wc:
@@ -136,7 +170,7 @@ def _build_strategy_text(
 
         lines.append("")
         lines.append("-" * W)
-        gw_header = f"  GW {gw}"
+        gw_header = f"  GW {gw}  ({gw_total_pts:.1f} pts)"
         if badge_str:
             gw_header += f"  {badge_str}"
         lines.append(gw_header)
@@ -277,9 +311,11 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
 
 
 def save_strategy(solution: Dict, scenario_name: str, total_points: float,
-                  current_gw: int, strategy_text: str = "") -> None:
+                  current_gw: int, strategy_text: str = "",
+                  output_suffix: str = "") -> None:
     """Save strategy to JSON and formatted text file."""
     OUTPUT_DIR.mkdir(exist_ok=True)
+    suffix = f"_{output_suffix}" if output_suffix else ""
     output = {
         "scenario": scenario_name,
         "total_expected_points": round(total_points, 1),
@@ -289,13 +325,13 @@ def save_strategy(solution: Dict, scenario_name: str, total_points: float,
         "captains": {str(k): v for k, v in solution["captains"].items()},
         "chips": {str(k): v for k, v in solution["chips"].items()},
     }
-    json_path = OUTPUT_DIR / f"strategy_gw{current_gw}.json"
+    json_path = OUTPUT_DIR / f"strategy_gw{current_gw}{suffix}.json"
     with open(json_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
     logger.info("Saved JSON strategy to %s", json_path)
 
     if strategy_text:
-        txt_path = OUTPUT_DIR / f"strategy_gw{current_gw}.txt"
+        txt_path = OUTPUT_DIR / f"strategy_gw{current_gw}{suffix}.txt"
         with open(txt_path, "w") as f:
             f.write(strategy_text)
         logger.info("Saved visual strategy to %s", txt_path)
@@ -374,17 +410,54 @@ def main() -> None:
         else:
             logger.warning("Fixture override: no match for team %d vs %d", home, away)
 
+    # Apply CLI extra overrides (--extra-override HOME:AWAY:GW)
+    for extra in args.extra_override:
+        parts = extra.split(":")
+        if len(parts) != 3:
+            logger.warning("Invalid --extra-override format '%s' (expected H:A:GW)", extra)
+            continue
+        home, away, new_gw = int(parts[0]), int(parts[1]), int(parts[2])
+        mask = (fixtures["team_h"] == home) & (fixtures["team_a"] == away)
+        matched = mask.sum()
+        if matched > 0:
+            old_gw = fixtures.loc[mask, "event"].iloc[0]
+            fixtures.loc[mask, "event"] = new_gw
+            logger.info("CLI fixture override: team %d vs %d moved from GW %s to GW %d",
+                        home, away, old_gw, new_gw)
+        else:
+            logger.warning("CLI fixture override: no match for team %d vs %d", home, away)
+
     predictions_path = OUTPUT_DIR / "predictions.csv"
+    gw_data_path = OUTPUT_DIR / "gw_data.csv"
+    gw_data_max_age_hours = 4
+
+    def _load_cached_gw_data() -> Optional[pd.DataFrame]:
+        """Load gw_data from cache if it exists and is fresh enough."""
+        if not gw_data_path.exists():
+            return None
+        age_hours = (time.time() - gw_data_path.stat().st_mtime) / 3600
+        if age_hours > gw_data_max_age_hours:
+            logger.info("Cached gw_data is %.1f hours old (limit: %d) — will re-fetch",
+                        age_hours, gw_data_max_age_hours)
+            return None
+        logger.info("Loading cached gw_data from %s (%.1f hours old)", gw_data_path, age_hours)
+        return pd.read_csv(gw_data_path)
+
+    # gw_data is fixture-independent (player history), so always try cache first
+    gw_data = _load_cached_gw_data()
+    if gw_data is None:
+        logger.info("Fetching gameweek data (this takes a few minutes)...")
+        gw_data = api.fetch_gameweek_data(bootstrap)
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        gw_data.to_csv(gw_data_path, index=False)
+        logger.info("Cached gw_data to %s (%d rows)", gw_data_path, len(gw_data))
+    else:
+        logger.info("GW data: %d records (from cache)", len(gw_data))
 
     if args.skip_predictions and predictions_path.exists():
         logger.info("Loading cached predictions from %s", predictions_path)
         predictions = pd.read_csv(predictions_path)
-        gw_data = api.fetch_gameweek_data(bootstrap)
     else:
-        logger.info("Fetching gameweek data (this takes a few minutes)...")
-        gw_data = api.fetch_gameweek_data(bootstrap)
-        logger.info("GW data: %d records", len(gw_data))
-
         logger.info("Generating predictions...")
         predictions = generate_predictions(gw_data, fixtures, multipliers,
                                            current_season_tiers, season)
@@ -398,8 +471,10 @@ def main() -> None:
     must_include.extend(overrides.get("extra_players", []))
     must_exclude = overrides.get("excluded_players", [])
     min_hist_games = solver_params.get("min_hist_games", 7)
+    min_hist_window = solver_params.get("min_hist_window", 10)
 
     watchlist = create_watchlist(predictions, gw_data, min_hist_games=min_hist_games,
+                                min_hist_window=min_hist_window,
                                 must_include=must_include, must_exclude=must_exclude)
     logger.info("Watchlist: %d players", len(watchlist))
 
@@ -409,9 +484,23 @@ def main() -> None:
     bench_boost_used = chips_cfg.get("bench_boost_used", 0)
     triple_captain_used = chips_cfg.get("triple_captain_used", 0)
 
+    force_free_hit_gw = chips_cfg.get("force_free_hit_gw")
+    force_bench_boost_gw = chips_cfg.get("force_bench_boost_gw")
+    force_triple_captain_gw = chips_cfg.get("force_triple_captain_gw")
+    force_wildcard_gw = chips_cfg.get("force_wildcard_gw")
+
+    # CLI overrides take precedence over config
+    if args.force_wildcard_gw is not None:
+        force_wildcard_gw = args.force_wildcard_gw
+    if args.force_free_hit_gw is not None:
+        force_free_hit_gw = args.force_free_hit_gw
+    if args.force_bench_boost_gw is not None:
+        force_bench_boost_gw = args.force_bench_boost_gw
+
     if args.no_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [],
-                           "bench_boost_gw": -1, "triple_captain_gw": -1}]
+                           "bench_boost_gw": -1, "triple_captain_gw": -1,
+                           "force_wildcard_gw": None}]
     else:
         chip_scenarios = generate_chip_scenarios(
             start_gw=current_gw,
@@ -422,6 +511,10 @@ def main() -> None:
             bench_boost_used_second_half=max(0, bench_boost_used - 1),
             triple_captain_used_first_half=min(triple_captain_used, 1),
             triple_captain_used_second_half=max(0, triple_captain_used - 1),
+            force_free_hit_gw=force_free_hit_gw,
+            force_bench_boost_gw=force_bench_boost_gw,
+            force_triple_captain_gw=force_triple_captain_gw,
+            force_wildcard_gw=force_wildcard_gw,
         )
 
     max_scenarios = solver_params.get("max_scenarios", 100)
@@ -448,6 +541,8 @@ def main() -> None:
     sub_probability = solver_params.get("sub_probability", 0.10)
     first_gw_penalty = solver_params.get("first_gw_transfer_penalty", -1)
     time_limit = solver_params.get("time_limit_per_scenario", 15)
+    if args.time_limit is not None:
+        time_limit = args.time_limit
 
     logger.info("Testing %d chip scenarios...", len(chip_scenarios))
     start_time = time.time()
@@ -471,6 +566,7 @@ def main() -> None:
             bench_boost_gw=scenario["bench_boost_gw"],
             triple_captain_gw=scenario["triple_captain_gw"],
             free_hit_gws=scenario["free_hit_gws"],
+            force_wildcard_gw=scenario.get("force_wildcard_gw"),
         )
 
         solver.load_predictions(predictions)
@@ -541,7 +637,8 @@ def main() -> None:
     )
 
     save_strategy(best_result["solution"], best_result["scenario_name"],
-                  best_total, current_gw, strategy_text=strategy_text)
+                  best_total, current_gw, strategy_text=strategy_text,
+                  output_suffix=args.output_suffix)
 
 
 if __name__ == "__main__":

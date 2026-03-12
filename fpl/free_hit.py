@@ -50,22 +50,31 @@ def generate_chip_scenarios(
     bench_boost_used_second_half: int = 0,
     triple_captain_used_first_half: int = 0,
     triple_captain_used_second_half: int = 0,
+    force_free_hit_gw: Optional[int] = None,
+    force_bench_boost_gw: Optional[int] = None,
+    force_triple_captain_gw: Optional[int] = None,
+    force_wildcard_gw: Optional[int] = None,
 ) -> List[Dict]:
     """
     Generate all valid chip combinations (FH x BB x TC), respecting the
     1-per-half-season rule for every chip type and the 1-chip-per-GW conflict.
 
-    All unused chips are always enumerated — there is no enable/disable toggle.
+    When a force_*_gw is set, that chip is pinned to the given GW and no other
+    options are enumerated for it — dramatically reducing the scenario count.
 
     Args:
         start_gw: First GW of the planning horizon.
         planning_horizon: Number of GWs to plan.
         *_first_half / *_second_half: How many of each chip have been used in
             GW 1-19 and GW 20-38 respectively (0 or 1).
+        force_free_hit_gw: Pin Free Hit to this GW (None = enumerate all options).
+        force_bench_boost_gw: Pin Bench Boost to this GW (None = enumerate).
+        force_triple_captain_gw: Pin Triple Captain to this GW (None = enumerate).
+        force_wildcard_gw: Pin Wildcard to this GW (None = let solver decide).
 
     Returns:
         List of scenario dicts with: name, free_hit_gws, bench_boost_gw,
-        triple_captain_gw.  -1 means "chip not used this scenario".
+        triple_captain_gw, force_wildcard_gw.  -1 means "chip not used this scenario".
     """
     all_gws = list(range(start_gw, start_gw + planning_horizon))
     first_half_gws = [
@@ -77,37 +86,51 @@ def generate_chip_scenarios(
         if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
     ]
 
-    # --- FH scenarios (can use up to 2: one per half) ---
-    remaining_fh_first = max(0, 1 - free_hits_used_first_half)
-    remaining_fh_second = max(0, 1 - free_hits_used_second_half)
+    # --- FH scenarios ---
+    if force_free_hit_gw is not None:
+        fh_scenarios: List[Dict] = [
+            {"name": f"FH GW{force_free_hit_gw}", "free_hit_gws": [force_free_hit_gw]},
+        ]
+        logger.info("Free Hit forced on GW %d — skipping FH enumeration", force_free_hit_gw)
+    else:
+        remaining_fh_first = max(0, 1 - free_hits_used_first_half)
+        remaining_fh_second = max(0, 1 - free_hits_used_second_half)
 
-    fh_scenarios: List[Dict] = [{"name": "No Free Hit", "free_hit_gws": []}]
-    if remaining_fh_first > 0 and first_half_gws:
-        for gw in first_half_gws:
-            fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
-    if remaining_fh_second > 0 and second_half_gws:
-        for gw in second_half_gws:
-            fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
-    if remaining_fh_first > 0 and remaining_fh_second > 0 and first_half_gws and second_half_gws:
-        for gw1 in first_half_gws:
-            for gw2 in second_half_gws:
-                fh_scenarios.append({
-                    "name": f"FH GW{gw1}+{gw2}", "free_hit_gws": [gw1, gw2],
-                })
+        fh_scenarios = [{"name": "No Free Hit", "free_hit_gws": []}]
+        if remaining_fh_first > 0 and first_half_gws:
+            for gw in first_half_gws:
+                fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
+        if remaining_fh_second > 0 and second_half_gws:
+            for gw in second_half_gws:
+                fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
+        if remaining_fh_first > 0 and remaining_fh_second > 0 and first_half_gws and second_half_gws:
+            for gw1 in first_half_gws:
+                for gw2 in second_half_gws:
+                    fh_scenarios.append({
+                        "name": f"FH GW{gw1}+{gw2}", "free_hit_gws": [gw1, gw2],
+                    })
 
-    # --- BB options (1-per-half rule) ---
-    bb_options: List[int] = [-1]
-    bb_options.extend(_half_season_chip_options(
-        bench_boost_used_first_half, bench_boost_used_second_half,
-        first_half_gws, second_half_gws,
-    ))
+    # --- BB options ---
+    if force_bench_boost_gw is not None:
+        bb_options: List[int] = [force_bench_boost_gw]
+        logger.info("Bench Boost forced on GW %d — skipping BB enumeration", force_bench_boost_gw)
+    else:
+        bb_options = [-1]
+        bb_options.extend(_half_season_chip_options(
+            bench_boost_used_first_half, bench_boost_used_second_half,
+            first_half_gws, second_half_gws,
+        ))
 
-    # --- TC options (1-per-half rule) ---
-    tc_options: List[int] = [-1]
-    tc_options.extend(_half_season_chip_options(
-        triple_captain_used_first_half, triple_captain_used_second_half,
-        first_half_gws, second_half_gws,
-    ))
+    # --- TC options ---
+    if force_triple_captain_gw is not None:
+        tc_options: List[int] = [force_triple_captain_gw]
+        logger.info("Triple Captain forced on GW %d — skipping TC enumeration", force_triple_captain_gw)
+    else:
+        tc_options = [-1]
+        tc_options.extend(_half_season_chip_options(
+            triple_captain_used_first_half, triple_captain_used_second_half,
+            first_half_gws, second_half_gws,
+        ))
 
     # --- Cartesian product with 1-chip-per-GW conflict filter ---
     scenarios: List[Dict] = []
@@ -136,6 +159,7 @@ def generate_chip_scenarios(
                     "free_hit_gws": list(fh["free_hit_gws"]),
                     "bench_boost_gw": bb_gw,
                     "triple_captain_gw": tc_gw,
+                    "force_wildcard_gw": force_wildcard_gw,
                 })
 
     logger.info(
