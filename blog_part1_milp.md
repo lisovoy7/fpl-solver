@@ -1,12 +1,20 @@
 # I Built a MILP Solver to Manage My Fantasy Premier League Team — Part 1: The Optimization Engine
 
-Building a competitive FPL solver requires two components: a **prediction engine** that forecasts how many points each player will score in each upcoming gameweek, and an **optimization engine** that uses those predictions to decide which players to own, when to transfer them, who to captain, and when to play each chip. Together, they produce a full season strategy — gameweek by gameweek — that maximizes expected points while respecting FPL's constraints (budget, squad composition, transfer rules, chip timing).
+FPL looks deceptively simple on the surface: pick 15 players, choose 11 to start each week, captain someone. But the moment you try to think even a few gameweeks ahead, the complexity explodes.
 
-Over the past year, I've built an open-source framework that brings together both the prediction and optimization sides of Fantasy Premier League management — and I'm excited to share it with you, including all the code. To make it digestible, I've split this into two posts: Part 1 (this post) explains the **optimization engine** — the mathematical framework that turns predictions into decisions. Part 2 will walk through the **prediction engine** — how we estimate expected points for every player in every gameweek.
+Consider what a single decision actually involves. You're choosing from **~750 available players** to fill 15 squad slots under strict constraints: exactly 2 GK, 5 DEF, 5 MID, 3 FWD, no more than 3 from any one club, and a £100m budget. From those 15, you pick 11 starters each week in a valid formation, plus a captain whose points are doubled. You have **one free transfer per gameweek** (unused ones roll over, up to a maximum of 5), and any extra transfers beyond your free allowance cost you 4 points each — permanently. And spread across the season, you have **4 chips** (Wildcard, Free Hit, Bench Boost, Triple Captain), each playable once per half-season, never two in the same gameweek.
 
-Why this order? Prediction is the more intuitive problem. Most FPL analytics sites publish some form of expected points, and the concepts (xG, xA, fixture difficulty) are widely understood. Optimization, on the other hand, is where the real leverage lies — and where most managers (and even most FPL tools) fall short. You can have perfect predictions and still make suboptimal decisions if you're not thinking holistically about the entire season.
+Now try to decide: should you use your wildcard this week or next? Is it worth taking a -4 hit for that urgent upgrade? Should you save the bench boost for the double gameweek in GW33, or is there a better window? How do you balance building for the long run against the player who's on fire right now?
 
-So we'll start with optimization, assuming predictions already exist. Think of it as: "given that we know Salah is expected to score 7.2 points in GW30, what should we do?"
+Every one of these decisions interacts with every other. Selling a player today changes your budget for the next five weeks. Using a chip now means it's gone when a better moment arrives. The number of possible squad sequences, lineup combinations, transfer paths, and chip schedules across a full season is astronomically large — far beyond what any human can reason through, even with a spreadsheet and an entire Sunday afternoon.
+
+This is why most FPL managers — even experienced ones — rely on gut feel, Reddit consensus, and greedy one-week thinking. And this is exactly the kind of problem that **mathematical optimization** was designed to solve.
+
+---
+
+Over the past year, I've built an open-source framework that tackles both sides of the problem: a **prediction engine** that estimates how many points each player is expected to score in every upcoming gameweek, and an **optimization engine** that turns those predictions into a full season plan. To keep this digestible, I've split it into two posts. Part 1 (this post) covers the **optimization engine**. Part 2 covers the **prediction engine**.
+
+Why this order? Prediction is the more intuitive problem — concepts like xG, xA, and fixture difficulty are widely discussed in the FPL community. Optimization is where the real leverage is, and where most tools fall short. You can have perfect predictions and still make poor decisions if you're thinking one week at a time. So we start here, assuming predictions already exist. Think of it as: *"given that we know Salah is expected to score 7.2 points in GW30 — what should we actually do?"*
 
 ---
 
@@ -27,19 +35,6 @@ This result comes from my specific squad, my remaining chips, my budget, and the
 So, how does the solver figure this out? By evaluating *every* legal combination of transfers, lineups, captains, and chip timings simultaneously — and picking the one that maximizes total expected points over the entire horizon, for every plausible fixture schedule.
 
 This post explains how.
-
----
-
-## Why This Problem Is Hard
-
-At first glance, FPL squad management looks like a spreadsheet exercise: pick 15 good players, captain the best one, done. But the decision space is enormous:
-
-- **~300 eligible players**, 15 squad slots, with position and club constraints
-- **Up to 38 gameweeks** to plan across, each requiring a lineup of 11 from your 15
-- **Transfers** that carry over week-to-week (unused free transfers bank up to 5, paid transfers cost -4 points each)
-- **4 chips** (Wildcard, Free Hit, Bench Boost, Triple Captain) that can each be played once per half-season, never two on the same gameweek
-
-A brute-force enumeration of all possible squad sequences and chip timings would take longer than the heat death of the universe. We need a smarter approach.
 
 ---
 
