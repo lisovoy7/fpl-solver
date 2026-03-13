@@ -228,7 +228,7 @@ Where:
 **Bench Boost GW:** When BB is active, bench players score full points. The complement weights are added:
 
 $$
-\phantom{+}\, (1-\alpha) \cdot E_{p,t} \cdot y_{p,t} + (1-\beta) \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + (1-\alpha) \cdot E_{p,t} \cdot c_{p,t}
+(1-\alpha) \cdot E_{p,t} \cdot y_{p,t} + (1-\beta) \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + (1-\alpha) \cdot E_{p,t} \cdot c_{p,t}
 $$
 
 This makes $\alpha + (1-\alpha) = 1$ for starters and bench alike — everyone scores full points.
