@@ -1,10 +1,12 @@
 # I Built a MILP Solver to Manage My Fantasy Premier League Team — Part 1: The Optimization Engine
 
-*Part 1 of 2. This post covers the mathematical optimization model that decides transfers, lineups, captaincy, and chip timing across the entire FPL season. Part 2 will cover the prediction engine — how we estimate expected points per player per gameweek.*
+Building a competitive FPL solver requires two components: a **prediction engine** that forecasts how many points each player will score in each upcoming gameweek, and an **optimization engine** that uses those predictions to decide which players to own, when to transfer them, who to captain, and when to play each chip. Together, they produce a full season strategy — gameweek by gameweek — that maximizes expected points while respecting FPL's constraints (budget, squad composition, transfer rules, chip timing).
 
----
+Over the past year, I've built an open-source framework that brings together both the prediction and optimization sides of Fantasy Premier League management — and I'm excited to share it with you, including all the code. To make it digestible, I've split this into two posts: Part 1 (this post) explains the **optimization engine** — the mathematical framework that turns predictions into decisions. Part 2 will walk through the **prediction engine** — how we estimate expected points for every player in every gameweek.
 
-> **Disclaimer:** This post assumes we already have predictions — expected FPL points for every player in every future gameweek. Think of it as a magic spreadsheet that tells you "Salah is expected to score 7.2 points in GW30." How those predictions are generated (xG models, fixture multipliers, Poisson distributions) is the subject of Part 2. Here, we focus on: *given those numbers, what decisions should we make?*
+Why this order? Prediction is the more intuitive problem. Most FPL analytics sites publish some form of expected points, and the concepts (xG, xA, fixture difficulty) are widely understood. Optimization, on the other hand, is where the real leverage lies — and where most managers (and even most FPL tools) fall short. You can have perfect predictions and still make suboptimal decisions if you're not thinking holistically about the entire season.
+
+So we'll start with optimization, assuming predictions already exist. Think of it as: "given that we know Salah is expected to score 7.2 points in GW30, what should we do?"
 
 ---
 
@@ -91,23 +93,33 @@ With ~300 candidate players and a full-season horizon, that's potentially tens o
 
 ### The Objective Function
 
-We want to maximize total expected points, accounting for lineup probability, bench insurance, captaincy, and transfer costs:
+We want to maximize total expected points, accounting for captaincy and transfer costs:
 
 $$
-\max \sum_{t=1}^{H} \left[ \sum_{p \in P} \left( \alpha \cdot E_{p,t} \cdot y_{p,t} + \beta \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + \alpha \cdot E_{p,t} \cdot c_{p,t} \right) - 4h_t \right]
+\max \sum_{t=1}^{H} \left[ \sum_{p \in P} \left( E_{p,t} \cdot y_{p,t} + E_{p,t} \cdot c_{p,t} \right) - 4h_t \right]
 $$
 
 Let's unpack each term:
 
-- **$\alpha \cdot E_{p,t} \cdot y_{p,t}$** — Expected points from each starter, weighted by $\alpha = 1 - p_{\text{sub}}$. Why not full weight? Because there's a chance (lets say ~10%) any starter gets rotated or injured and doesn't play. We discount starters slightly to value bench insurance.
+$$
+E_{p,t} \cdot y_{p,t}
+$$
 
-- **$\beta \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t})$** — Expected points from bench players. The term $(x_{p,t} - y_{p,t})$ is 1 only for players in the squad but NOT starting. $\beta = \frac{11 \cdot p_{\text{sub}}}{4}$ reflects the probability that a bench player gets subbed on (shared across 4 bench slots).
+Expected points from each starter. If player *p* is in the starting XI at gameweek *t*, their full expected points count toward the total.
 
-- **$\alpha \cdot E_{p,t} \cdot c_{p,t}$** — Captain bonus. The captain's points are doubled, so this extra copy of $E_{p,t}$ adds the second instance.
+$$
+E_{p,t} \cdot c_{p,t}
+$$
 
-- **$-4h_t$** — Transfer penalty. Each paid transfer costs 4 points, exactly as in FPL.
+Captain bonus. The captain's points are doubled in FPL, so this extra copy adds the second instance. Combined with the starter term above, the captain effectively contributes 2 × E.
 
-> **For the non-technical reader:** The formula simply says "add up all the expected points from starters and bench, double the captain's points, and subtract 4 for every extra transfer you use." The Greek letters are just weights that reflect the small risk that a starter might not play on any given week.
+$$
+-4h_t
+$$
+
+Transfer penalty. Each paid transfer costs 4 points, exactly as in FPL.
+
+> **For the non-technical reader:** The formula simply says "add up all the expected points from starters, double the captain's points, and subtract 4 for every extra transfer you use."
 
 ### The Constraints
 
@@ -166,7 +178,7 @@ The problem: chip timing interacts with everything else. Using Wildcard in GW10 
 
 You might wonder: why not just add Bench Boost, Triple Captain, and Free Hit as decision variables inside the MILP, like we do with Wildcard?
 
-The answer is **computational complexity**. Each chip introduces non-linear interactions with the objective function. Bench Boost, for example, changes the weight of every bench player from $\beta$ to 1.0 — but only for the GW where it's active. Modeling this inside the MILP requires auxiliary binary variables for every player-gameweek combination (to toggle between "BB active" and "BB inactive" weights), plus Big-M constraints to link them. For Bench Boost alone, this would add ~$|P| \times |T|$ new auxiliary variables and twice as many constraints. Multiply by three chips and the model bloats dramatically — solver runtime can explode from minutes to hours.
+The answer is **computational complexity**. Each chip introduces non-linear interactions with the objective function. Bench Boost, for example, changes how bench players are scored — but only for the GW where it's active. Modeling this inside the MILP requires auxiliary binary variables for every player-gameweek combination, plus Big-M constraints to link them. Multiply by three chips and the model bloats dramatically — solver runtime can explode from minutes to hours.
 
 Instead, we **decompose** the problem. Wildcard stays inside the MILP (it's elegantly handled by the Big-M method on transfer constraints). But BB, TC, and Free Hit are enumerated as **scenarios**:
 
@@ -263,7 +275,7 @@ Of course, this varies by manager. Your remaining chips, current squad, budget, 
 
 ## Personal Notes
 
-A confession: even though I like football, I didn't really follow the Premier League that closely before this project. I knew the top clubs, recognized the big-name players, but that was about it. When I started playing FPL this season, I had very little domain knowledge — so I did something naive. I took the FPL player prices as a proxy for expected performance, assuming the organizers had done the hard work of encoding quality into price. That was my "prediction engine" for the first few weeks. Simple, arguably stupid, but it was a starting point.
+A confession: this is actually my first season playing FPL. Even though I like football, I didn't really follow the Premier League that closely before this project. I knew the top clubs, recognized the big-name players, but that was about it. With so little domain knowledge, I did something naive at the start: I took the FPL player prices as a proxy for expected performance, assuming the organizers had done the hard work of encoding quality into price. That was my "prediction engine" for the first few weeks. Simple, arguably stupid, but it was a starting point.
 
 Around **Gameweek 7**, I plugged in the MILP solver and the component-based prediction engine described in Part 2. I don't blindly follow the solver's output — I use it as a **co-pilot**, not an autopilot.
 

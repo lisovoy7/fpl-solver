@@ -68,7 +68,7 @@ All parameters live in `config.yaml`. Below is a complete reference for every pa
 
 | Parameter | Type | Description |
 |---|---|---|
-| `team_id` | int | Your FPL team ID. Find it in your team URL: `fantasy.premierleague.com/entry/YOUR_ID/` |
+| `team_id` | int | Your FPL manager ID. See [Finding IDs](#finding-ids) section below |
 | `free_transfers` | int | Free transfers you currently have available. Must be set manually — the FPL API does not reliably expose this value |
 
 ### Auto-detected Parameters
@@ -218,6 +218,51 @@ extra_players:
   - 256    # Munoz — new signing, only 3 starts but looks strong
   - 267    # Sarr — returning from injury, want solver to consider him
 ```
+
+## Finding IDs
+
+Several config parameters require numeric IDs. Here's exactly where to find each one.
+
+### Your Manager ID (`team_id`)
+
+1. Log in to [fantasy.premierleague.com](https://fantasy.premierleague.com)
+2. Click **Points** or **My Team** — the URL in your browser will look like:
+   `https://fantasy.premierleague.com/entry/1234567/event/30/`
+3. The number after `/entry/` is your manager ID. In this example: `1234567`
+
+### Player IDs (`player`, `excluded_players`, `extra_players`, `forced_lineup`, `non_playing`, `points_multiplier`)
+
+The easiest way: use the FPL API directly.
+
+Open this URL in your browser:
+```
+https://fantasy.premierleague.com/api/bootstrap-static/
+```
+
+This returns a large JSON. Search for the player's surname (use Ctrl+F / Cmd+F) and look for the `"id"` field next to their name entry. That number is their player ID.
+
+Alternatively, many FPL community sites (e.g. [fplreview.com](https://fplreview.com), [livefpl.net](https://livefpl.net)) display player IDs in their data tables. You can also check the URL when viewing a player's profile on the official FPL site.
+
+### Team IDs (`fixture_overrides` — `home_team` / `away_team`)
+
+Team IDs are also in the bootstrap API response above — look for the `"teams"` array and find the team by name. Each entry has an `"id"` field.
+
+For quick reference, the 20 Premier League team IDs for the 2024/25 season:
+
+| ID | Team | ID | Team |
+|----|------|----|------|
+| 1  | Arsenal | 11 | Liverpool |
+| 2  | Aston Villa | 12 | Man City |
+| 3  | Bournemouth | 13 | Man Utd |
+| 4  | Brentford | 14 | Newcastle |
+| 5  | Brighton | 15 | Nott'm Forest |
+| 6  | Chelsea | 16 | Southampton |
+| 7  | Crystal Palace | 17 | Spurs |
+| 8  | Everton | 18 | West Ham |
+| 9  | Fulham | 19 | Wolves |
+| 10 | Ipswich | 20 | Leicester |
+
+> Note: team IDs stay consistent within a season but can change when promoted/relegated teams enter the league. Always verify against the bootstrap API if in doubt.
 
 ## Output
 
