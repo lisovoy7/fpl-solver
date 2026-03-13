@@ -228,7 +228,7 @@ Where:
 **Bench Boost GW:** When BB is active, bench players score full points. The complement weights are added:
 
 $$
-+ (1-\alpha) \cdot E_{p,t} \cdot y_{p,t} + (1-\beta) \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + (1-\alpha) \cdot E_{p,t} \cdot c_{p,t}
+\phantom{+}\, (1-\alpha) \cdot E_{p,t} \cdot y_{p,t} + (1-\beta) \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + (1-\alpha) \cdot E_{p,t} \cdot c_{p,t}
 $$
 
 This makes $\alpha + (1-\alpha) = 1$ for starters and bench alike — everyone scores full points.
@@ -236,7 +236,7 @@ This makes $\alpha + (1-\alpha) = 1$ for starters and bench alike — everyone s
 **Triple Captain GW:** When TC is active, the captain scores **3×** instead of 2×. An additional captain term is added:
 
 $$
-+ \alpha \cdot E_{p,t} \cdot c_{p,t}
+\alpha \cdot E_{p,t} \cdot c_{p,t}
 $$
 
 (If both BB and TC are on the same GW — which is blocked by chip conflict rules — a fourth term would also apply.)
