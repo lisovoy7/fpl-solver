@@ -1,0 +1,18 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:1200px;height:630px;overflow:hidden;background:#faf8f5;font-family:'IBM Plex Mono',monospace;position:relative}.c{position:relative;z-index:1;padding:60px 80px;height:100%;display:flex;flex-direction:column;justify-content:space-between}.top-line{width:80px;height:3px;background:#1a1a1a}.tag{color:#888;font-size:11px;letter-spacing:3px;text-transform:uppercase;margin-top:16px}h1{font-family:'Instrument Serif',serif;color:#1a1a1a;font-size:54px;line-height:1.15;max-width:700px;font-weight:400}h1 em{font-style:italic;color:#7c3aed}
+.eq{font-family:'IBM Plex Mono',monospace;font-size:17px;color:#7c3aed;background:rgba(124,58,237,0.06);display:inline-block;padding:14px 24px;border-left:3px solid #7c3aed;margin-top:20px;line-height:1.8}
+.bot{display:flex;justify-content:space-between;align-items:flex-end}.part{font-size:12px;letter-spacing:2px;color:#666}.credit{font-size:11px;color:#aaa}</style></head><body>
+<div class="c">
+<div>
+<div class="top-line"></div>
+<div class="tag">Part 2 — The Prediction Engine</div>
+<h1>Turning xG Into <em>Expected FPL Points</em></h1>
+<div class="eq">P(clean sheet) = e<sup>−λ</sup> &nbsp;where λ = xGC × multiplier<br>E<sub>goals</sub> = avg_norm_xG × multiplier × goal_pts<br>E<sub>total</sub> = Σ<sub>i=1..9</sub> component<sub>i</sub></div>
+</div>
+<div class="bot">
+<div class="part">xG · xA · POISSON · FIXTURE MULTIPLIERS · BPS</div>
+<div class="credit">fpl-solver — open source</div>
+</div>
+</div>
+</body></html>

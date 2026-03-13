@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #fff; padding: 24px 32px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; color: #1a1a1a; }
+table { border-collapse: collapse; }
+th { text-align: left; padding: 10px 20px 10px 0; border-bottom: 2px solid #e5e7eb; font-weight: 600; color: #374151; }
+td { padding: 8px 20px 8px 0; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+td:first-child { min-width: 80px; }
+td:nth-child(2) { min-width: 70px; color: #6b7280; }
+</style>
+</head><body>
+<table>
+<tr><th>Variable</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><span id="v1"></span></td><td>Binary</td><td>Is player <i>p</i> in the squad at GW <i>t</i>?</td></tr>
+<tr><td><span id="v2"></span></td><td>Binary</td><td>Is player <i>p</i> in the starting XI at GW <i>t</i>?</td></tr>
+<tr><td><span id="v3"></span></td><td>Binary</td><td>Is player <i>p</i> the captain at GW <i>t</i>?</td></tr>
+<tr><td><span id="v4"></span></td><td>Binary</td><td>Is player <i>p</i> transferred IN at GW <i>t</i>?</td></tr>
+<tr><td><span id="v5"></span></td><td>Binary</td><td>Is player <i>p</i> transferred OUT at GW <i>t</i>?</td></tr>
+<tr><td><span id="v6"></span></td><td>Binary</td><td>Is Wildcard played at GW <i>t</i>?</td></tr>
+<tr><td><span id="v7"></span></td><td>Integer</td><td>Free transfers available at start of GW <i>t</i></td></tr>
+<tr><td><span id="v8"></span></td><td>Integer</td><td>Paid transfers at GW <i>t</i> (costing −4 pts each)</td></tr>
+</table>
+<script>
+const vars = {
+  v1: 'x_{p,t}', v2: 'y_{p,t}', v3: 'c_{p,t}', v4: 's_{p,t}',
+  v5: 'r_{p,t}', v6: 'w_t', v7: 'A_t', v8: 'h_t'
+};
+for (const [id, tex] of Object.entries(vars)) {
+  katex.render(tex, document.getElementById(id), { throwOnError: false });
+}
+</script>
+</body></html>

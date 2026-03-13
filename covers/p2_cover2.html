@@ -1,0 +1,31 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:1200px;height:630px;overflow:hidden;background:#111827;position:relative;font-family:'JetBrains Mono',monospace}.stripe{position:absolute;left:0;top:0;width:8px;height:100%;background:linear-gradient(180deg,#f59e0b,#ef4444,#ec4899)}.content{padding:60px 60px 60px 80px;height:100%;display:flex;gap:60px}.left{flex:1;display:flex;flex-direction:column;justify-content:space-between}.right{width:360px;display:flex;flex-direction:column;justify-content:center;gap:12px}.tag{color:#f59e0b;font-size:12px;letter-spacing:3px;text-transform:uppercase;font-weight:700}h1{font-family:'DM Serif Display',serif;color:#f9fafb;font-size:46px;line-height:1.2}h1 em{font-style:normal;color:#f59e0b}.desc{color:#9ca3af;font-size:14px;line-height:1.7;max-width:480px}.part-badge{display:inline-block;background:rgba(245,158,11,0.15);color:#f59e0b;padding:6px 16px;border-radius:4px;font-size:12px;letter-spacing:1px;font-weight:700}
+.pipeline{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:20px;font-size:12px;line-height:2.2;color:#6b7280}.pipeline .step{color:#f59e0b}.pipeline .arrow{color:#4b5563}</style></head><body>
+<div class="stripe"></div>
+<div class="content">
+<div class="left">
+<div>
+<div class="tag">FPL × Statistical Modeling</div><br>
+<h1>From Raw Stats to <em>Expected Points</em></h1><br>
+<div class="desc">A 9-component prediction engine that normalizes historical xG/xA, applies fixture multipliers, and uses Poisson models for clean sheet probability.</div>
+</div>
+<div class="part-badge">PART 2 — THE PREDICTION ENGINE</div>
+</div>
+<div class="right">
+<div class="pipeline">
+<span class="step">① Normalize</span><br>
+raw_stat ÷ fixture_multiplier<br>
+<span class="arrow">────────── ↓ ──────────</span><br>
+<span class="step">② Average</span><br>
+mean(last 10 normalized games)<br>
+<span class="arrow">────────── ↓ ──────────</span><br>
+<span class="step">③ Re-scale</span><br>
+baseline × future_multiplier<br>
+<span class="arrow">────────── ↓ ──────────</span><br>
+<span class="step">④ Sum 9 components</span><br>
+→ E<sub>p,t</sub> expected points
+</div>
+</div>
+</div>
+</body></html>

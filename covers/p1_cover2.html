@@ -1,0 +1,29 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:1200px;height:630px;overflow:hidden;background:#111827;position:relative;font-family:'JetBrains Mono',monospace}.stripe{position:absolute;left:0;top:0;width:8px;height:100%;background:linear-gradient(180deg,#10b981,#3b82f6,#8b5cf6)}.content{padding:60px 60px 60px 80px;height:100%;display:flex;gap:60px}.left{flex:1;display:flex;flex-direction:column;justify-content:space-between}.right{width:360px;display:flex;flex-direction:column;justify-content:center;gap:12px}.tag{color:#10b981;font-size:12px;letter-spacing:3px;text-transform:uppercase;font-weight:700}h1{font-family:'DM Serif Display',serif;color:#f9fafb;font-size:48px;line-height:1.2}h1 em{font-style:normal;color:#10b981}.desc{color:#9ca3af;font-size:14px;line-height:1.7;max-width:480px}.part-badge{display:inline-block;background:rgba(16,185,129,0.15);color:#10b981;padding:6px 16px;border-radius:4px;font-size:12px;letter-spacing:1px;font-weight:700}.code{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:18px;font-size:12px;line-height:1.9;color:#6b7280}.code .kw{color:#10b981}.code .var{color:#60a5fa}.code .num{color:#f59e0b}.code .cm{color:#4b5563}</style></head><body>
+<div class="stripe"></div>
+<div class="content">
+<div class="left">
+<div>
+<div class="tag">FPL × Mathematical Optimization</div><br>
+<h1>Solving Fantasy Football with <em>Integer Programming</em></h1><br>
+<div class="desc">A holistic MILP model that optimizes your entire remaining season — transfers, captains, bench, and all four chips — in one solve.</div>
+</div>
+<div class="part-badge">PART 1 — THE OPTIMIZATION ENGINE</div>
+</div>
+<div class="right">
+<div class="code">
+<span class="cm"># decision variables</span><br>
+<span class="kw">x</span>[p,t] ∈ {<span class="num">0</span>,<span class="num">1</span>} <span class="cm"># squad</span><br>
+<span class="kw">y</span>[p,t] ∈ {<span class="num">0</span>,<span class="num">1</span>} <span class="cm"># lineup</span><br>
+<span class="kw">c</span>[p,t] ∈ {<span class="num">0</span>,<span class="num">1</span>} <span class="cm"># captain</span><br>
+<span class="kw">w</span>[t] &nbsp;&nbsp;∈ {<span class="num">0</span>,<span class="num">1</span>} <span class="cm"># wildcard</span><br><br>
+<span class="cm"># objective</span><br>
+<span class="var">max</span> Σ<sub>t</sub> [ α·E·<span class="kw">y</span> + β·E·(<span class="kw">x</span>-<span class="kw">y</span>)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ α·E·<span class="kw">c</span> - <span class="num">4</span>·h ]<br><br>
+<span class="cm"># constraints: 5,000+</span><br>
+<span class="cm"># variables: 7,200+</span>
+</div>
+</div>
+</div>
+</body></html>

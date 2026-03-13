@@ -1,0 +1,36 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Grotesk:wght@400;600&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:1200px;height:630px;overflow:hidden;background:#18181b;position:relative;font-family:'Space Grotesk',sans-serif}
+.circles{position:absolute;inset:0;overflow:hidden}
+.circle{position:absolute;border-radius:50%;border:1px solid rgba(236,72,153,0.1)}
+.c1{width:600px;height:600px;right:-200px;top:-200px}
+.c2{width:400px;height:400px;right:-100px;top:-100px}
+.c3{width:800px;height:800px;right:-300px;top:-300px}
+.glow{position:absolute;width:300px;height:300px;background:radial-gradient(circle,rgba(236,72,153,0.12),transparent 70%);right:100px;top:50%;transform:translateY(-50%)}
+.c{position:relative;z-index:1;padding:70px 80px;height:100%;display:flex;flex-direction:column;justify-content:space-between}
+.label{display:inline-block;background:#ec4899;color:#18181b;padding:4px 12px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase}
+h1{font-family:'Syne',sans-serif;color:#fafafa;font-size:48px;font-weight:800;line-height:1.15;max-width:750px;margin-top:20px}
+h1 span{color:#ec4899}
+.desc{color:#71717a;font-size:14px;line-height:1.7;max-width:600px;margin-top:12px}
+.footer{display:flex;align-items:center;gap:30px;color:#52525b;font-size:12px;letter-spacing:1px}
+.footer .sep{width:40px;height:1px;background:#3f3f46}
+</style></head><body>
+<div class="circles"><div class="circle c1"></div><div class="circle c2"></div><div class="circle c3"></div></div>
+<div class="glow"></div>
+<div class="c">
+<div>
+<div class="label">Part 2</div>
+<h1>How I Predict <span>Expected FPL Points</span> for Every Player, Every Gameweek</h1>
+<div class="desc">Normalize away fixture bias, compute baselines from xG/xA, and re-scale for future opponents — with Poisson models for clean sheets.</div>
+</div>
+<div class="footer">
+<span>THE PREDICTION ENGINE</span>
+<div class="sep"></div>
+<span>xG · xA · xGC</span>
+<div class="sep"></div>
+<span>POISSON</span>
+<div class="sep"></div>
+<span>9 COMPONENTS</span>
+</div>
+</div>
+</body></html>

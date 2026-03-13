@@ -146,7 +146,7 @@ For each (player, fixture) combination, compute predicted points for 9 component
   - GK/DEF: `predicted_points = P(CS) × 4.0`
   - MID: `predicted_points = P(CS) × 1.0`
   - FWD: `predicted_points = 0`
-- **Derivation:** Under a Poisson model, the probability of zero goals conceded is \(e^{-\lambda}\) where \(\lambda\) = expected goals conceded for the fixture.
+- **Derivation:** Under a Poisson model, the probability of zero goals conceded is $e^{-\lambda}$ where $\lambda$ = expected goals conceded for the fixture.
 - **predicted_xGC** = `avg_norm_xGC × fixture_multiplier` (same as component 5).
 
 #### 8. Defensive Contribution (BPS-based)
@@ -185,27 +185,27 @@ The decision engine formulates the entire remaining FPL season as a **single Mix
 
 | Symbol | Description |
 |---|---|
-| \(P\) | Set of all candidate players (the watchlist) |
-| \(T = \{1, 2, ..., H\}\) | Set of gameweeks in the planning horizon (internal indexing) |
-| \(E_{p,t}\) | Expected points for player \(p\) in gameweek \(t\) |
+| $P$ | Set of all candidate players (the watchlist) |
+| $T = \{1, 2, ..., H\}$ | Set of gameweeks in the planning horizon (internal indexing) |
+| $E_{p,t}$ | Expected points for player $p$ in gameweek $t$ |
 
 ### Decision Variables
 
 | Variable | Type | Description |
 |---|---|---|
-| \(x_{p,t}\) | Binary | 1 if player \(p\) is in the squad at GW \(t\) |
-| \(y_{p,t}\) | Binary | 1 if player \(p\) is in the starting XI at GW \(t\) |
-| \(c_{p,t}\) | Binary | 1 if player \(p\) is captain at GW \(t\) |
-| \(s_{p,t}\) | Binary | 1 if player \(p\) is transferred IN at GW \(t\) |
-| \(r_{p,t}\) | Binary | 1 if player \(p\) is transferred OUT at GW \(t\) |
-| \(u_t\) | Integer ≥ 0 | Total transfers used at GW \(t\) |
-| \(A_t\) | Integer [0, 5] | Free transfers available at start of GW \(t\) |
-| \(h_t\) | Integer ≥ 0 | Paid (penalty) transfers at GW \(t\) |
-| \(w_t\) | Binary | 1 if Wildcard is played at GW \(t\) |
+| $x_{p,t}$ | Binary | 1 if player $p$ is in the squad at GW $t$ |
+| $y_{p,t}$ | Binary | 1 if player $p$ is in the starting XI at GW $t$ |
+| $c_{p,t}$ | Binary | 1 if player $p$ is captain at GW $t$ |
+| $s_{p,t}$ | Binary | 1 if player $p$ is transferred IN at GW $t$ |
+| $r_{p,t}$ | Binary | 1 if player $p$ is transferred OUT at GW $t$ |
+| $u_t$ | Integer ≥ 0 | Total transfers used at GW $t$ |
+| $A_t$ | Integer [0, 5] | Free transfers available at start of GW $t$ |
+| $h_t$ | Integer ≥ 0 | Paid (penalty) transfers at GW $t$ |
+| $w_t$ | Binary | 1 if Wildcard is played at GW $t$ |
 
 ### Objective Function
 
-\[
+$$
 \max \sum_{t \in T} \left[
   \sum_{p \in P} \left(
     \alpha \cdot E_{p,t} \cdot y_{p,t}
@@ -215,29 +215,29 @@ The decision engine formulates the entire remaining FPL season as a **single Mix
   - 4 \cdot h_t
   + \text{first\_gw\_penalty}
 \right]
-\]
+$$
 
 Where:
-- \(\alpha = 1 - p_{sub}\) — lineup weight (probability the starter actually plays)
-- \(\beta = \frac{11 \cdot p_{sub}}{4}\) — bench weight (expected value of each bench player as a substitute)
-- \(p_{sub}\) — substitution probability (`sub_probability` config param, default 0.10)
+- $\alpha = 1 - p_{sub}$ — lineup weight (probability the starter actually plays)
+- $\beta = \frac{11 \cdot p_{sub}}{4}$ — bench weight (expected value of each bench player as a substitute)
+- $p_{sub}$ — substitution probability (`sub_probability` config param, default 0.10)
 - The captain term `α · E · c` adds an extra copy of the captain's points (making it 2× total)
-- \(h_t\) — paid transfers, penalized at **-4 points each** (FPL rule)
+- $h_t$ — paid transfers, penalized at **-4 points each** (FPL rule)
 - `first_gw_penalty` — small artificial penalty (-1 or -2) on GW 1 transfers to avoid front-loading
 
 **Bench Boost GW:** When BB is active, bench players score full points. The complement weights are added:
 
-\[
+$$
 + (1-\alpha) \cdot E_{p,t} \cdot y_{p,t} + (1-\beta) \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + (1-\alpha) \cdot E_{p,t} \cdot c_{p,t}
-\]
+$$
 
-This makes \(\alpha + (1-\alpha) = 1\) for starters and bench alike — everyone scores full points.
+This makes $\alpha + (1-\alpha) = 1$ for starters and bench alike — everyone scores full points.
 
 **Triple Captain GW:** When TC is active, the captain scores **3×** instead of 2×. An additional captain term is added:
 
-\[
+$$
 + \alpha \cdot E_{p,t} \cdot c_{p,t}
-\]
+$$
 
 (If both BB and TC are on the same GW — which is blocked by chip conflict rules — a fourth term would also apply.)
 
@@ -249,18 +249,19 @@ This makes \(\alpha + (1-\alpha) = 1\) for starters and bench alike — everyone
 
 Tracks squad evolution through transfers:
 
-\[
+$$
 x_{p,1} = \text{initial}_{p} + s_{p,1} - r_{p,1}
-\]
-\[
+$$
+
+$$
 x_{p,t} = x_{p,t-1} + s_{p,t} - r_{p,t} \quad \forall t \geq 2
-\]
+$$
 
 Transfer counts are symmetric (transfers in = transfers out):
 
-\[
+$$
 u_t = \sum_{p} s_{p,t} = \sum_{p} r_{p,t}
-\]
+$$
 
 #### Squad Composition
 
@@ -276,66 +277,69 @@ Every GW the starting XI must have:
 - Exactly 11 starters
 - Exactly 1 GK
 - 3-5 DEF, 2-5 MID, 1-3 FWD (valid FPL formations)
-- Starters must be in the squad: \(y_{p,t} \leq x_{p,t}\)
-- Captain must be a starter: \(c_{p,t} \leq y_{p,t}\)
+- Starters must be in the squad: $y_{p,t} \leq x_{p,t}$
+- Captain must be a starter: $c_{p,t} \leq y_{p,t}$
 - Exactly 1 captain per GW
 
 #### Transfer Banking
 
 Free transfers accumulate: unused transfers roll over, capped at 5.
 
-\[
+$$
 A_{t+1} \leq A_t - (u_t - h_t) + 1 + M \cdot w_t
-\]
+$$
 
-Where \(M = 15\) (Big-M) deactivates the constraint when Wildcard is played (making all transfers free).
+Where $M = 15$ (Big-M) deactivates the constraint when Wildcard is played (making all transfers free).
 
 The upper bound also resets when Wildcard is used:
 
-\[
+$$
 A_{t+1} \leq A_t + M \cdot (1 - w_t)
-\]
-\[
+$$
+
+$$
 A_{t+1} \geq A_t - M \cdot (1 - w_t)
-\]
+$$
 
 #### Paid Transfer Penalties
 
 Paid transfers = max(0, transfers_used - free_transfers_available):
 
-\[
+$$
 h_t \geq u_t - A_t - M \cdot w_t
-\]
-\[
-h_t \leq u_t
-\]
-\[
-h_t \leq M \cdot (1 - w_t)
-\]
+$$
 
-The third constraint ensures \(h_t = 0\) when Wildcard is active (all transfers are free during WC).
+$$
+h_t \leq u_t
+$$
+
+$$
+h_t \leq M \cdot (1 - w_t)
+$$
+
+The third constraint ensures $h_t = 0$ when Wildcard is active (all transfers are free during WC).
 
 #### Blank Gameweek (BGW) Handling
 
 Players with no fixture in a GW (no entry in `expected_points`) are prevented from starting or being captain:
 
-\[
+$$
 y_{p,t} = 0 \quad \text{and} \quad c_{p,t} = 0 \quad \text{if } (p, t) \notin E
-\]
+$$
 
 They can still be owned in the squad (useful if the BGW is temporary and they play the following week).
 
 #### Non-Playing Player Overrides
 
-For manually flagged non-playing players (injury, suspension), their expected points \(E_{p,t}\) are set to 0 in the objective function for the specified GWs. No hard constraint is added — the solver naturally avoids starting them since they contribute 0 points, but may keep them in the squad if they're expected to return.
+For manually flagged non-playing players (injury, suspension), their expected points $E_{p,t}$ are set to 0 in the objective function for the specified GWs. No hard constraint is added — the solver naturally avoids starting them since they contribute 0 points, but may keep them in the squad if they're expected to return.
 
 #### Forced Lineup Overrides
 
 For forced starters, an equality constraint is added:
 
-\[
+$$
 y_{p,t} = 1 \quad \text{for specified } (p, t)
-\]
+$$
 
 ### Chip Handling
 
@@ -343,7 +347,7 @@ y_{p,t} = 1 \quad \text{for specified } (p, t)
 
 - One per half-season (GW 1-19, GW 20-38).
 - When active: all transfers are free, transfer banking resets.
-- Constraint: \(\sum_{t \in \text{first\_half}} w_t \leq 1 - \text{used\_first\_half}\) (and similarly for second half).
+- Constraint: $\sum_{t \in \text{first\_half}} w_t \leq 1 - \text{used\_first\_half}$ (and similarly for second half).
 - Cannot overlap with BB, TC, or FH in the same GW.
 
 #### Bench Boost and Triple Captain
@@ -364,9 +368,9 @@ Free Hit GWs are also determined by scenario enumeration. For a FH GW:
 
 A standalone single-GW MILP that picks the best possible 15-man squad (unconstrained by the current squad):
 
-**Variables:** \(x_p\) (squad), \(y_p\) (lineup), \(c_p\) (captain) — all binary.
+**Variables:** $x_p$ (squad), $y_p$ (lineup), $c_p$ (captain) — all binary.
 
-**Objective:** \(\max \sum_p E_p \cdot y_p + E_p \cdot c_p\)
+**Objective:** $\max \sum_p E_p \cdot y_p + E_p \cdot c_p$
 
 **Constraints:**
 - 15 players, 2/5/5/3 composition, ≤ 3 per club
