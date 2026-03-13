@@ -206,15 +206,7 @@ The decision engine formulates the entire remaining FPL season as a **single Mix
 ### Objective Function
 
 $$
-\max \sum_{t \in T} \left[
-  \sum_{p \in P} \left(
-    \alpha \cdot E_{p,t} \cdot y_{p,t}
-    + \beta \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t})
-    + \alpha \cdot E_{p,t} \cdot c_{p,t}
-  \right)
-  - 4 \cdot h_t
-  + \text{first\_gw\_penalty}
-\right]
+\max \sum_{t \in T} \left[ \sum_{p \in P} \left( \alpha \cdot E_{p,t} \cdot y_{p,t} + \beta \cdot E_{p,t} \cdot (x_{p,t} - y_{p,t}) + \alpha \cdot E_{p,t} \cdot c_{p,t} \right) - 4 \cdot h_t \right]
 $$
 
 Where:
@@ -347,7 +339,7 @@ $$
 
 - One per half-season (GW 1-19, GW 20-38).
 - When active: all transfers are free, transfer banking resets.
-- Constraint: $\sum_{t \in \text{first\_half}} w_t \leq 1 - \text{used\_first\_half}$ (and similarly for second half).
+- Constraint: sum of wildcard variables over the half ≤ 1 minus already-used count (and similarly for second half).
 - Cannot overlap with BB, TC, or FH in the same GW.
 
 #### Bench Boost and Triple Captain
