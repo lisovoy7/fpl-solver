@@ -1,0 +1,821 @@
+player_id,player_name,position
+116,Aaron Hickey,DEF
+674,Aaron Ramsdale,GK
+211,Aaron Ramsey,MID
+610,Aaron Wan-Bissaka,DEF
+234,Aarón Anselmino,DEF
+165,Abdallah Sima,MID
+554,Abdoullah Ba,MID
+406,Abdukodir Khusanov,DEF
+817,Adam Armstrong,FWD
+667,Adam Aznou,DEF
+73,Adam Smith,DEF
+153,Adam Webster,DEF
+273,Adam Wharton,MID
+326,Adama Traoré Diarra,MID
+176,Adrian Mazilu,MID
+74,Adrien Truffert,DEF
+562,Ahmed Abdullahi,FWD
+752,Airidas Golambeckis,DEF
+533,Aji Alese,DEF
+555,Alan Browne,MID
+29,Albert Sambi Lokonga,MID
+453,Alejandro Garnacho Ferreyra,MID
+340,Alex Cairns,GK
+324,Alex Iwobi,MID
+481,Alex Murphy,DEF
+70,Alex Paulsen,GK
+90,Alex Scott,MID
+801,Alex Tóth,MID
+499,Alexander Isak,FWD
+386,Alexis Mac Allister,MID
+786,Alfie McNally,GK
+641,Alfie Pond,DEF
+366,Alisson Becker,GK
+600,Alphonse Areola,GK
+431,Altay Bayındır,GK
+792,Alysson Edward Franco da Rocha dos Santos,MID
+452,Amad Diallo,MID
+59,Amadou Onana,MID
+378,Amara Nallo,DEF
+697,Amine Adli,MID
+711,Andre Harriman-Annous,MID
+327,Andreas Hoelgebaum Pereira,MID
+177,Andrew Moran,MID
+372,Andrew Robertson,DEF
+246,Andrey Nascimento dos Santos,MID
+432,André Onana,GK
+643,André Trindade da Costa Neto,MID
+42,Andrés García,DEF
+621,Andy Irving,MID
+816,Angel Gomes,MID
+675,Angus Gunn,GK
+486,Anthony Elanga,MID
+485,Anthony Gordon,MID
+528,Anthony Patterson,GK
+82,Antoine Semenyo,MID
+660,Anton Stach,MID
+316,Antonee Robinson,DEF
+122,Antoni Milambo,MID
+454,Antony dos Santos,MID
+567,Antonín Kinský,GK
+492,Antoñito Cordero Campillo,MID
+591,Archie Gray,MID
+680,Armando Broja,FWD
+696,Arnaud Kalimuendo,FWD
+678,Arthur Masuaku,DEF
+274,Asher Agbinone,MID
+218,Ashley Barnes,FWD
+576,Ashley Phillips,DEF
+815,Axel Disasi,DEF
+198,Axel Tuanzebe,DEF
+447,Ayden Heaven,DEF
+685,Bafodé Diakité,DEF
+139,Bart Verbruggen,GK
+193,Bashir Humphreys,DEF
+639,Bastien Meupiyou Menadjou,DEF
+60,Ben Broggio,MID
+780,Ben Casey,FWD
+571,Ben Davies,DEF
+391,Ben Gannon-Doak,MID
+96,Ben Winterburn,MID
+769,Bendito Mantato,MID
+114,Benjamin Arthur,DEF
+115,Benjamin Fredrick,DEF
+664,Benjamin Lecomte,GK
+681,Benjamin Sesko,FWD
+11,Benjamin White,DEF
+229,Benoît Badiashile Mukinayi,DEF
+416,Bernardo Mota Veiga de Carvalho e Silva,MID
+314,Bernd Leno,GK
+735,Bertrand Traoré,MID
+530,Blondy Nna Noukeu,GK
+259,Borna Sosa,DEF
+58,Boubacar Kamara,MID
+649,Boubacar Traoré,MID
+702,Bradley Burrowes,MID
+779,Braiden Graham,FWD
+162,Brajan Gruda,MID
+566,Brandon Austin,GK
+13,Brayden Clarke,DEF
+350,Brenden Aaronson,MID
+580,Brennan Johnson,MID
+730,Brian Brobbey,FWD
+449,Bruno Borges Fernandes,MID
+488,Bruno Guimarães Rodriguez Moura,MID
+590,Bryan Gil Salvatierra,MID
+119,Bryan Mbeumo,MID
+16,Bukayo Saka,MID
+265,Caleb Kporha,DEF
+69,Callan McKenna,GK
+306,Callum Bates,MID
+516,Callum Hudson-Odoi,MID
+626,Callum Marshall,FWD
+595,Callum Olusesi,MID
+671,Callum Wilson,FWD
+318,Calvin Bassey,DEF
+380,Calvin Ramsay,DEF
+101,Caoimhín Kelleher,GK
+141,Carl Rushworth,GK
+301,Carlos Alcaraz Durán,MID
+167,Carlos Baleba,MID
+457,Carlos Henrique Casimiro,MID
+503,Carlos Miguel dos Santos Pereira,GK
+262,Chadi Riad Dnanou,DEF
+181,Charalampos Kostoulas,FWD
+359,Charlie Crew,MID
+763,Charlie Gray,MID
+799,Charlie Stevens,MID
+156,Charlie Tasker,DEF
+268,Cheick Doucouré,MID
+553,Chemsdine Talbi,MID
+467,Chido Obi,FWD
+79,Chris Mepham,DEF
+261,Chris Richards,DEF
+551,Chris Rigg,MID
+525,Chris Wood,FWD
+732,Christantus Uche,FWD
+24,Christian Nørgaard,MID
+240,Christopher Nkunku,MID
+806,Christos Mandas,GK
+425,Claudio Echeverri,MID
+307,Coby Ebere,MID
+384,Cody Gakpo,MID
+235,Cole Palmer,MID
+186,Connor Roberts,DEF
+375,Conor Bradley,DEF
+796,Conor Gallagher,MID
+662,Cristhian Mosquera,DEF
+569,Cristian Romero,DEF
+615,Crysencio Summerville,MID
+388,Curtis Jones,MID
+271,Daichi Kamada,MID
+476,Dan Burn,DEF
+669,Dan Ndoye,MID
+549,Dan Neil,MID
+599,Dane Scarlett,FWD
+83,Dango Ouattara,MID
+99,Daniel Adu-Adjei,FWD
+531,Daniel Ballard,DEF
+629,Daniel Bentley,GK
+353,Daniel James,MID
+256,Daniel Muñoz Mejía,DEF
+798,Danny Imray,DEF
+178,Danny Welbeck,FWD
+204,Darko Churlinov,MID
+361,Darko Gyabi,MID
+397,Darwin Núñez Ribeiro,FWD
+86,David Brooks,MID
+509,David Mota Veiga Teixeira do Carmo,DEF
+682,David Møller Wolfe,DEF
+280,David Ozoh,MID
+1,David Raya Martín,GK
+773,Dean Benamar,DEF
+253,Dean Henderson,GK
+21,Declan Rice,MID
+583,Dejan Kulusevski,MID
+535,Dennis Cirkin,DEF
+435,Dermot Mee,GK
+574,Destiny Udogie,DEF
+144,Diego Coppola,DEF
+169,Diego Gómez Amarilla,MID
+439,Diego León Blanco,DEF
+734,Dilane Bakwa,MID
+440,Diogo Dalot Teixeira,DEF
+739,Divine Mukasa,MID
+573,Djed Spence,DEF
+800,Djiamgone Jocelin Ta Bi,MID
+691,Dominic Calvert-Lewin,FWD
+94,Dominic Sadi,MID
+596,Dominic Solanke-Mitchell,FWD
+387,Dominik Szoboszlai,MID
+53,Donyell Malen,MID
+699,Douglas Luiz Soares de Paulo,MID
+300,Dwight McNeil,MID
+247,Dário Luís Essugo,MID
+266,Eberechi Eze,MID
+284,Eddie Nketiah,FWD
+399,Ederson Santana de Moraes,GK
+616,Edson Álvarez Velázquez,MID
+154,Eiran Cashin,DEF
+603,El Hadji Malick Diouf,DEF
+561,Eliezer Mayenda Dossou,FWD
+705,Elijah Campbell,DEF
+102,Ellery Balcombe,GK
+517,Elliot Anderson,MID
+433,Elyh Harrison,GK
+604,Emerson Palmieri dos Santos,DEF
+479,Emil Krafth,DEF
+325,Emile Smith Rowe,MID
+50,Emiliano Buendía Stati,MID
+32,Emiliano Martínez Romero,GK
+631,Emmanuel Agbadou,DEF
+392,Endo Wataru,MID
+98,Enes Ünal,FWD
+203,Enock Agyei,MID
+652,Enso González Medina,MID
+56,Enzo Barrenechea,MID
+237,Enzo Fernández,MID
+547,Enzo Le Fée,MID
+523,Eric da Silva Moreira,MID
+430,Erling Haaland,FWD
+238,Estêvão Almeida de Oliveira Gonçalves,MID
+354,Ethan Ampadu,MID
+25,Ethan Nwaneri,MID
+111,Ethan Pinnock,DEF
+778,Ethan Sutherland,MID
+468,Ethan Wheatley,FWD
+184,Etienne Green,GK
+179,Evan Ferguson,FWD
+677,Evann Guessand,MID
+747,Ezra Mayers,DEF
+38,Ezri Konsa Ngoyo,DEF
+474,Fabian Schär,DEF
+168,Facundo Buonanotte,MID
+385,Federico Chiesa,MID
+511,Felipe Rodrigues da Silva,DEF
+645,Fer López González,MID
+148,Ferdi Kadıoğlu,DEF
+221,Filip Jörgensen,GK
+35,Filip Marschall,GK
+722,Florentino Ibrain Morris Luís,MID
+382,Florian Wirtz,MID
+97,Francisco Evanilson de Lima Barbosa,FWD
+282,Franco Umeh-Chibueze,MID
+128,Frank Onyeka,MID
+782,Fraser Forster,GK
+623,Freddie Potts,MID
+761,Freddie Simmonds,DEF
+369,Freddie Woodman,GK
+23,Fábio Ferreira Vieira,MID
+123,Fábio Freitas Gouveia Carvalho,MID
+655,Fábio Soares Silva,FWD
+31,Gabriel Fernando de Jesus,FWD
+347,Gabriel Gudmundsson,DEF
+19,Gabriel Martinelli Silva,MID
+223,Gabriel Słonina,GK
+5,Gabriel dos Santos Magalhães,DEF
+496,Garang Kuol,MID
+784,George Brierley,MID
+620,George Earthy,MID
+754,George Hemmings,MID
+793,George King,DEF
+158,Georginio Rutter,MID
+736,Gianluigi Donnarumma,GK
+367,Giorgi Mamardashvili,GK
+692,Giovanni Leoni,DEF
+788,Godwill Kukonki,DEF
+647,Gonçalo Manuel Ganchinho Guedes,MID
+668,Granit Xhaka,MID
+565,Guglielmo Vicario,GK
+618,Guido Rodríguez,MID
+127,Gustavo Nunes Fernandes Gomes,MID
+544,Habib Diarra,MID
+93,Hamed Traorè,MID
+188,Hannes Delcroix,DEF
+207,Hannibal Mejbri,MID
+305,Harrison Armstrong,MID
+482,Harrison Ashby,DEF
+557,Harrison Jones,MID
+336,Harrison Reed,MID
+445,Harry Amass,DEF
+741,Harry Gray,FWD
+795,Harry Howell,MID
+442,Harry Maguire,DEF
+289,Harry Tyrer,GK
+329,Harry Wilson,MID
+487,Harvey Barnes,MID
+389,Harvey Elliott,MID
+190,Hjalmar Ekdal,DEF
+633,Hugo Bueno López,DEF
+661,Hugo Ekitiké,FWD
+642,Hwang Hee-chan,MID
+105,Hákon Rafn Valdimarsson,GK
+39,Ian Maatsen,DEF
+550,Ian Poveda-Ocampo,MID
+521,Ibrahim Sangaré,MID
+374,Ibrahima Konaté,DEF
+302,Idrissa Gana Gueye,MID
+526,Igor Jesus Maciel da Cruz,FWD
+149,Igor Julio dos Santos de Paulo,DEF
+136,Igor Thiago Nascimento Rodrigues,FWD
+356,Ilia Gruev,MID
+299,Iliman Ndiaye,MID
+339,Illan Meslier,GK
+71,Illia Zabarnyi,DEF
+495,Isaac Hayden,MID
+308,Isaac Heath,MID
+349,Isaac Schmidt,DEF
+267,Ismaïla Sarr,MID
+28,Ismeal Kabia,MID
+320,Issa Diop,DEF
+137,Iwan Morgan,FWD
+462,Jack Fletcher,MID
+419,Jack Grealish,MID
+352,Jack Harrison,MID
+163,Jack Hinshelwood,MID
+464,Jack Moorhouse,MID
+695,Jackson Tchatchoua,DEF
+202,Jacob Bruun Larsen,MID
+489,Jacob Murphy,MID
+52,Jacob Ramsey,MID
+155,Jacob Slater,DEF
+456,Jadon Sancho,MID
+200,Jaidon Anthony,MID
+510,Jair Paula da Cunha Filho,DEF
+344,Jaka Bijol,DEF
+293,Jake O'Brien,DEF
+9,Jakub Kiwior,DEF
+480,Jamaal Lascelles,DEF
+62,Jamaldeen Jimoh-Aloba,MID
+303,James Garner,MID
+77,James Hill,DEF
+706,James Justin,DEF
+581,James Maddison,MID
+426,James McAtee,MID
+394,James McConnell,MID
+170,James Milner,MID
+750,James Rowswell,DEF
+291,James Tarkowski,DEF
+182,James Trafford,GK
+614,James Ward-Prowse,MID
+818,James Wilson,FWD
+688,James Wright,GK
+239,Jamie Bynoe-Gittens,MID
+151,Jan Paul van Hecke,DEF
+290,Jarrad Branthwaite,DEF
+624,Jarrod Bowen,FWD
+138,Jason Steele,GK
+558,Jay Matete,MID
+461,Jayce Fitzgerald,MID
+723,Jaydee Canvot,DEF
+342,Jayden Bogle,DEF
+398,Jayden Danns,FWD
+118,Jayden Meghoma,DEF
+213,Jaydon Banel,MID
+609,Jean-Clair Todibo,DEF
+283,Jean-Philippe Mateta,FWD
+644,Jean-Ricner Bellegarde,MID
+272,Jefferson Lerma Solís,MID
+774,Jenson Jones,DEF
+309,Jenson Metcalfe,MID
+542,Jenson Seelt,DEF
+370,Jeremie Frimpong,DEF
+171,Jeremy Sarmiento Morante,MID
+809,Jerome Abbey,MID
+278,Jesurun Rak-Sakyi,MID
+663,Jhon Arias,MID
+317,Joachim Andersen,DEF
+534,Joe Anderson,DEF
+34,Joe Gauci,GK
+360,Joe Gelhardt,MID
+376,Joe Gomez,DEF
+653,Joe Hodge,MID
+175,Joe Knight,MID
+348,Joe Rodon,DEF
+498,Joe White,MID
+494,Joe Willock,MID
+199,Joe Worrall,DEF
+490,Joelinton Cássio Apolinário de Lira,MID
+54,John McGinn,MID
+753,John Ruddy,GK
+409,John Stones,DEF
+715,John Victor Maciel Furtado,GK
+737,Jonah Kusi-Asare,FWD
+194,Jordan Beyer,DEF
+124,Jordan Henderson,MID
+287,Jordan Pickford,GK
+321,Jorge Cuenca Barreno,DEF
+672,Jorrel Hato,DEF
+233,Josh Acheampong,DEF
+205,Josh Cullen,MID
+748,Josh Dasilva,MID
+335,Josh King,MID
+209,Josh Laurent,MID
+15,Josh Nichols,DEF
+466,Joshua Zirkzee,FWD
+628,José Malheiro de Sá,GK
+673,João Maria Lobo Alves Palhares Costa Palhinha Gonçalves,MID
+518,João Pedro Ferreira da Silva,MID
+249,João Pedro Junqueira de Jesus,FWD
+646,João Victor Gomes da Silva,MID
+804,João Victor de Souza Menezes,DEF
+762,Joél Drakes-Thomas,MID
+362,Joël Piroe,FWD
+152,Joël Veltman,DEF
+403,Joško Gvardiol,DEF
+104,Julian Eyestone,GK
+161,Julio Enciso Espínola,MID
+80,Julio Soler Barreto,DEF
+78,Julián Araujo Zúñiga,DEF
+745,Jun'ai Byfield,DEF
+100,Junior Kroupi,FWD
+8,Jurriën Timber,DEF
+276,Justin Devenny,MID
+81,Justin Kluivert,MID
+418,Jérémy Doku,MID
+654,Jørgen Strand Larsen,FWD
+63,Kadan Young,MID
+281,Kaden Rodney,MID
+611,Kaelan Casey,DEF
+30,Kai Havertz,FWD
+429,Kalvin Phillips,MID
+341,Karl Darlow,GK
+3,Karl Hein,GK
+797,Kaye Furo,FWD
+107,Keane Lewis-Potter,DEF
+802,Keiber Lamadrid,MID
+248,Kendry Páez Andrade,MID
+322,Kenny Tete,DEF
+2,Kepa Arrizabalaga Revuelta,GK
+570,Kevin Danso,DEF
+731,Kevin Santos Lopes de Macedo,MID
+120,Kevin Schade,MID
+638,Ki-Jana Hoever,DEF
+820,Kian McMahon-Brown,MID
+746,Kieran Morrison,MID
+478,Kieran Trippier,DEF
+242,Kiernan Dewsbury-Hall,MID
+117,Kim Ji-soo,DEF
+142,Kjell Scherpen,GK
+458,Kobbie Mainoo,MID
+606,Konstantinos Mavropanos,DEF
+377,Konstantinos Tsimikas,DEF
+108,Kristoffer Ajer,DEF
+602,Krisztián Hegyi,GK
+187,Kyle Walker,DEF
+659,Kyle Walker-Peters,DEF
+709,Ladislav Krejcí,DEF
+44,Lamare Bogarde,DEF
+743,Landon Emenalo,MID
+357,Largie Ramazani,MID
+61,Leander Dendoncker,MID
+20,Leandro Trossard,MID
+444,Leny Yoro,DEF
+536,Leo Fuhr Hjelde,DEF
+765,Leo Shahar,DEF
+49,Leon Bailey,MID
+657,Leon Chiwome,FWD
+768,Leon Routh,DEF
+676,Lesley Ugochukwu,MID
+227,Levi Samuels Colwill,DEF
+88,Lewis Cook,MID
+57,Lewis Dobbin,MID
+146,Lewis Dunk,DEF
+473,Lewis Hall,DEF
+497,Lewis Miley,MID
+520,Lewis O'Brien,MID
+622,Lewis Orford,MID
+250,Liam Delap,FWD
+45,Lino da Cruz Sousa,DEF
+437,Lisandro Martínez,DEF
+805,Lorenzo Lucca,FWD
+210,Loum Tchaouna,MID
+208,Luca Koleosho,MID
+814,Luca Netz,DEF
+586,Lucas Bergvall,MID
+37,Lucas Digne,DEF
+665,Lucas Estella Perri,GK
+195,Lucas Pires Silva,DEF
+612,Lucas Tolentino Coelho de Lima,MID
+790,Lucá Williams-Barnett,MID
+383,Luis Díaz Marulanda,MID
+729,Luis Eduardo Soares da Silva,DEF
+619,Luis Guilherme Lira dos Santos,MID
+91,Luis Sinisterra Lucumí,MID
+810,Luka Bentt,MID
+578,Luka Vušković,DEF
+365,Lukas Nmecha,FWD
+738,Lukasz Fabianski,GK
+334,Luke Harris,MID
+539,Luke O'Nien,DEF
+767,Luke Rawlings,MID
+443,Luke Shaw,DEF
+724,Lutsharel Geertruida,DEF
+563,Luís Hemir Silva Semedo,FWD
+217,Lyle Foster,FWD
+679,Mads Hermansen,GK
+112,Mads Roerslev Rasmussen,DEF
+277,Malcolm Ebiowei,MID
+756,Malcom DaCosta,MID
+14,Maldini Kacurri,DEF
+684,Malick Thiaw,DEF
+174,Malick Yalcouyé,MID
+228,Malo Gusto,DEF
+231,Mamadou Sarr,DEF
+589,Manor Solomon,MID
+404,Manuel Akanji,DEF
+201,Manuel Benson Hedilazio,MID
+459,Manuel Ugarte Ribeiro,MID
+224,Marc Cucurella Saseta,DEF
+252,Marc Guiu Paz,FWD
+260,Marc Guéhi,DEF
+33,Marco Bizot,GK
+72,Marcos Senesi Barón,DEF
+401,Marcus Bettinelli,GK
+206,Marcus Edwards,MID
+451,Marcus Rashford,MID
+84,Marcus Tavernier,MID
+471,Mark Gillespie,GK
+288,Mark Travers,GK
+524,Marko Stamenić,MID
+759,Marli Salmon,DEF
+648,Marshall Munetsi,MID
+333,Martial Godo,MID
+470,Martin Dúbravka,GK
+313,Martin Sherif,FWD
+17,Martin Ødegaard,MID
+26,Martín Zubimendi Ibáñez,MID
+455,Mason Mount,MID
+75,Matai Akinmboni,DEF
+364,Mateo Joseph Fernández-Regatillo,FWD
+422,Mateo Kovačić,MID
+708,Mateus Gonçalo Espanha Fernandes,MID
+749,Mateus Mané,FWD
+279,Matheus França de Oliveira,MID
+407,Matheus Nunes,DEF
+450,Matheus Santos Carneiro da Cunha,MID
+126,Mathias Jensen,MID
+584,Mathys Tel,MID
+173,Mats Wieffer,MID
+632,Matt Doherty,DEF
+164,Matt O'Riley,MID
+484,Matt Targett,DEF
+504,Matt Turner,GK
+103,Matthew Cox,GK
+436,Matthijs de Ligt,DEF
+36,Matty Cash,DEF
+502,Matz Sels,GK
+794,Max Alleyne,DEF
+700,Max Dowman,MID
+789,Max Merrick,GK
+183,Max Weiß,GK
+257,Maxence Lacroix,DEF
+145,Maxim De Cuyper,DEF
+191,Maxime Estève,DEF
+605,Maximilian Kilman,DEF
+617,Maxwel Cornet,MID
+812,Melker Ellborg,GK
+728,Merlin Röhl,MID
+110,Michael Kayode,DEF
+295,Michael Keane,DEF
+219,Michael Obafemi,FWD
+575,Micky van de Ven,DEF
+222,Mike Penders,GK
+214,Mike Trésor Ndayishimiye,MID
+22,Mikel Merino Zazón,MID
+592,Mikey Moore,MID
+121,Mikkel Damsgaard,MID
+546,Milan Aleksić,MID
+371,Milos Kerkez,DEF
+483,Miodrag Pivaš,DEF
+157,Mitoma Kaoru,MID
+758,Mohamadou Kanté,MID
+381,Mohamed Salah,MID
+582,Mohammed Kudus,MID
+241,Moisés Caicedo Corozo,MID
+515,Morgan Gibbs-White,MID
+47,Morgan Rogers,MID
+506,Murillo Costa dos Santos,DEF
+245,Mykhailo Mudryk,MID
+10,Myles Lewis-Skelly,DEF
+133,Myles Peart-Harris,MID
+275,Naouirou Ahamada,MID
+405,Nathan Aké,DEF
+106,Nathan Collins,DEF
+658,Nathan Fraser,FWD
+296,Nathan Patterson,DEF
+263,Nathaniel Clyne,DEF
+607,Nayef Aguerd,DEF
+564,Nazarii Rusyn,FWD
+508,Neco Williams,DEF
+559,Nectarios Triantis,MID
+744,Nehemiah Oriola,MID
+537,Niall Huggins,DEF
+469,Nick Pope,GK
+714,Nick Woltemade,FWD
+625,Niclas Füllkrug,FWD
+423,Nico González Iglesias,MID
+411,Nico O'Reilly,DEF
+251,Nicolas Jackson,FWD
+519,Nicolás Domínguez,MID
+716,Nicolò Savona,DEF
+505,Nikola Milenković,DEF
+813,Nilson Angulo,MID
+698,Noah Okafor,MID
+552,Noah Sadiki,MID
+18,Noni Madueke,MID
+311,Norberto Bercique Gomes Betuncal,FWD
+66,Norberto Murara Neto,GK
+694,Nordi Mukiele,DEF
+438,Noussair Mazraoui,DEF
+285,Odsonne Édouard,FWD
+472,Odysseas Vlachodimos,GK
+507,Ola Aina,DEF
+12,Oleksandr Zinchenko,DEF
+776,Oliver Pimlott,MID
+197,Oliver Sonne,DEF
+143,Olivier Boscagli,DEF
+608,Ollie Scarles,DEF
+819,Ollie Shield,DEF
+64,Ollie Watkins,FWD
+212,Oluwaseun Adewumi,MID
+683,Omar Alderete,DEF
+413,Omar Marmoush,MID
+512,Omar Richards,DEF
+693,Omari Hutchinson,MID
+424,Oscar Bobb,MID
+76,Owen Bevan,DEF
+189,Owen Dodgson,DEF
+785,Pablo Felipe Pereira de Jesus,FWD
+593,Pape Matar Sarr,MID
+132,Paris Maghoma,MID
+783,Pascal Groß,MID
+343,Pascal Struijk,DEF
+363,Patrick Bamford,FWD
+441,Patrick Dorgu,DEF
+545,Patrick Roberts,MID
+41,Pau Torres,DEF
+640,Pedro Cardoso de Lima,DEF
+236,Pedro Lomba Neto,MID
+568,Pedro Porro Sauceda,DEF
+147,Pervis Estupiñán Tenorio,DEF
+414,Phil Foden,MID
+89,Philip Billing,MID
+725,Piero Hincapié,DEF
+556,Pierre Ekwah Elimby,MID
+192,Quilindschy Hartman,DEF
+572,Radu Drăgușin,DEF
+726,Randal Kolo Muani,FWD
+465,Rasmus Højlund,FWD
+402,Rayan Aït-Nouri,DEF
+417,Rayan Cherki,MID
+807,Rayan Vitor Simplício Rocha,MID
+337,Raúl Jiménez Rodríguez,FWD
+225,Reece James,DEF
+298,Reece Welch,DEF
+764,Reigan Heskey,MID
+541,Reinildo Mandava,DEF
+27,Reiss Nelson,MID
+255,Remi Matthews,GK
+687,Remy Rees-Dottin,MID
+379,Rhys Williams,DEF
+7,Riccardo Calafiori,DEF
+597,Richarlison de Andrade,FWD
+109,Rico Henry,DEF
+410,Rico Lewis,DEF
+690,Rio Cardines,MID
+811,Rio Kyerematen,MID
+686,Rio Ngumoha,MID
+264,Rob Holding,DEF
+220,Robert Lynch Sánchez,GK
+670,Robin Roefs,GK
+421,Rodrigo 'Rodri' Hernandez Cascante,MID
+585,Rodrigo Bentancur,MID
+635,Rodrigo Martins Gomes,DEF
+338,Rodrigo Muniz Carvalho,FWD
+269,Romain Esse,MID
+92,Romain Faivre,MID
+548,Romaine Mundle,MID
+297,Roman Dixon,DEF
+130,Romelle Donovan,MID
+244,Roméo Lavia,MID
+757,Ronnie Hollingshead,GK
+55,Ross Barkley,MID
+87,Ryan Christie,MID
+390,Ryan Gravenberch,MID
+742,Ryan McAidoo,MID
+328,Ryan Sessegnon,MID
+134,Ryan Trevitt,MID
+522,Ryan Yates,MID
+408,Rúben dos Santos Gato Alves Dias,DEF
+766,Saheed Olagunju,DEF
+772,Sam Alabi,MID
+346,Sam Byram,DEF
+787,Sam Chambers,MID
+355,Sam Greenwood,MID
+627,Sam Johnstone,GK
+703,Sam Proctor,GK
+323,Samuel Amissah,DEF
+727,Samuel Chukwueze,MID
+51,Samuel Iling-Junior,MID
+330,Sander Berge,MID
+491,Sandro Tonali,MID
+636,Santiago Ignacio Bueno,DEF
+656,Saša Kalajdžić,FWD
+332,Saša Lukić,MID
+493,Sean Longstaff,MID
+501,Sean Neave,FWD
+345,Sebastiaan Bornauw,DEF
+733,Senne Lammens,GK
+113,Sepp van den Berg,DEF
+770,Seth Ridgeon,MID
+689,Seung-Soo Park,MID
+755,Shea Lacey,MID
+196,Shurandy Sambo,DEF
+543,Simon Adingra,MID
+529,Simon Moore,GK
+159,Solly March,MID
+579,Son Heung-min,MID
+718,Soungoutou Magassa,MID
+393,Stefan Bajčetić Maquieira,MID
+400,Stefan Ortega Moreno,GK
+180,Stefanos Tzimas,FWD
+740,Stephen Mfuni,DEF
+315,Steven Benda,GK
+475,Sven Botman,DEF
+428,Sverre Nypan,MID
+415,Sávio Moreira de Oliveira,MID
+294,Séamus Coleman,DEF
+463,Sékou Koné,MID
+781,TJ Carroll,DEF
+527,Taiwo Awoniyi,FWD
+577,Takai Kōta,DEF
+808,Tammy Abraham,FWD
+358,Tanaka Ao,MID
+150,Tariq Lamptey,DEF
+650,Tawanda Chirewa,MID
+803,Teddy Sharman-Lowe,GK
+777,Temple Ojinnaka,MID
+310,Thierno Barry,FWD
+427,Tijjani Reijnders,MID
+304,Tim Iroegbunam,MID
+319,Timothy Castagne,DEF
+540,Timothée Pembélé,DEF
+477,Tino Livramento,DEF
+460,Toby Collyer,MID
+720,Tolu Arokodare,FWD
+331,Tom Cairney,MID
+651,Tom Edozie,MID
+434,Tom Heaton,GK
+630,Tom King,GK
+140,Tom McGill,GK
+172,Tom Watson,MID
+4,Tommy Setford,GK
+613,Tomáš Souček,MID
+232,Tosin Adarabioyo,DEF
+637,Toti Gomes,DEF
+532,Trai Hume,DEF
+710,Travis Patterson,DEF
+226,Trevoh Chalobah,DEF
+396,Trey Nyoni,MID
+701,Triston Rowe,DEF
+85,Tyler Adams,MID
+707,Tyler Dibling,MID
+771,Tyler Fletcher,MID
+446,Tyler Fredricson,DEF
+395,Tyler Morton,MID
+704,Tyler Onyango,MID
+775,Tymur Tutierov,MID
+448,Tyrell Malacia,DEF
+258,Tyrick Mitchell,DEF
+243,Tyrique George,MID
+40,Tyrone Mings,DEF
+791,Valentín Castellanos,FWD
+721,Veljko Milosavljevic,DEF
+719,Victor Lindelöf,DEF
+666,Viktor Gyökeres,FWD
+373,Virgil van Dijk,DEF
+292,Vitalii Mykolenko,DEF
+125,Vitaly Janelt,MID
+412,Vitor de Oliveira Nunes dos Reis,DEF
+185,Václav Hladký,GK
+254,Walter Benítez,GK
+760,Wellity Lucky,DEF
+601,Wes Foderingham,GK
+230,Wesley Fofana,DEF
+351,Wilfried Gnonto,MID
+68,Will Dennis,GK
+270,Will Hughes,MID
+598,Will Lankshear,FWD
+500,William Osula,FWD
+6,William Saliba,DEF
+514,Willy Boly,DEF
+560,Wilson Isidor,FWD
+588,Wilson Odobert,MID
+717,Xavi Simons,MID
+594,Yang Min-hyeok,MID
+160,Yankuba Minteh,MID
+166,Yasin Ayari,MID
+46,Yasin Özcan,DEF
+129,Yehor Yarmoliuk,MID
+634,Yerson Mosquera Valdelamar,DEF
+135,Yoane Wissa,FWD
+48,Youri Tielemans,MID
+312,Youssef Ramalho Chermiti,FWD
+131,Yunus Emre Konak,MID
+751,Yusuf Akhamrich,MID
+587,Yves Bissouma,MID
+712,Yéremy Pino Santos,MID
+513,Zach Abbott,DEF
+286,Zach Marsh,FWD
+95,Zain Silcott-Duberry,MID
+538,Zak Johnson,DEF
+216,Zeki Amdouni,FWD
+215,Zian Flemming,FWD
+65,Zépiqueno Redmond,FWD
+713,Álex Jiménez Sánchez,DEF
+43,Álex Moreno Lopera,DEF
+368,Ármin Pécsi,GK
+67,Đorđe Petrović,GK
+420,İlkay Gündoğan,MID

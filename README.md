@@ -232,16 +232,19 @@ Several config parameters require numeric IDs. Here's exactly where to find each
 
 ### Player IDs (`player`, `excluded_players`, `extra_players`, `forced_lineup`, `non_playing`, `points_multiplier`)
 
-The easiest way: use the FPL API directly.
+The simplest way: open `data/player_ids.csv` in this repo. It contains all ~820 active Premier League players with their ID, name, and position — ready to search.
 
-Open this URL in your browser:
 ```
-https://fantasy.premierleague.com/api/bootstrap-static/
+player_id, player_name,          position
+454,        Mohamed Salah,        MID
+328,        Erling Haaland,       FWD
+235,        Cole Palmer,          MID
+...
 ```
 
-This returns a large JSON. Search for the player's surname (use Ctrl+F / Cmd+F) and look for the `"id"` field next to their name entry. That number is their player ID.
+Just Ctrl+F the player's name and use the `player_id` value.
 
-Alternatively, many FPL community sites (e.g. [fplreview.com](https://fplreview.com), [livefpl.net](https://livefpl.net)) display player IDs in their data tables. You can also check the URL when viewing a player's profile on the official FPL site.
+> This file is a snapshot from the current season. If you need a freshly updated list after running the solver, the file `output/gw_data.csv` (generated automatically on first run) also contains every player — look for the `element` column (that's the player ID) alongside `name` and `position`.
 
 ### Team IDs (`fixture_overrides` — `home_team` / `away_team`)
 
