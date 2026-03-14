@@ -55,10 +55,10 @@ solver:
 # enumerated by the solver — no enable/disable toggles needed.
 
 chips:
-  wildcards_used: 1        # 0, 1, or 2 (one per half-season)
-  free_hits_used: 1        # 0, 1, or 2 (one per half-season)
-  bench_boost_used: 1      # 0, 1, or 2 (one per half-season)
-  triple_captain_used: 2   # 0, 1, or 2 (one per half-season)
+  # wildcards_used: 1        # 0, 1, or 2 (one per half-season) — auto-detected from API
+  # free_hits_used: 1        # 0, 1, or 2 (one per half-season) — auto-detected from API
+  # bench_boost_used: 1      # 0, 1, or 2 (one per half-season) — auto-detected from API
+  # triple_captain_used: 2   # 0, 1, or 2 (one per half-season) — auto-detected from API
 
   # Force a chip on a specific GW. When set, the solver pins that chip to the
   # given GW and skips iterating over other options — much faster optimization.
