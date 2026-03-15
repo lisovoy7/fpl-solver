@@ -263,6 +263,17 @@ class FPLSolver:
         self.initial_squad = squad_player_ids
         self.initial_transfers = available_transfers
 
+        # Verify all squad members are in the player pool
+        if self.players is not None:
+            pool_ids = set(self.players['element'].tolist())
+            missing = [p for p in squad_player_ids if p not in pool_ids]
+            if missing:
+                logger.warning(
+                    "%d initial squad players missing from player pool: %s "
+                    "(they will have 0 expected points in all GWs)",
+                    len(missing), missing,
+                )
+
         logger.info("Set initial squad with %d players", len(squad_player_ids))
         logger.info("Available transfers: %d", available_transfers)
 

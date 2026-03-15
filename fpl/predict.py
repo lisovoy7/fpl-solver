@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MIN_MINUTES = 60
-LAST_N_GAMES = 10
+LAST_N_GAMES = 6
 
 GOAL_POINTS = {"GK": 10, "DEF": 6, "MID": 5, "FWD": 4}
 

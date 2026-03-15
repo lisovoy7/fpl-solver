@@ -116,7 +116,7 @@ $$
 
 Transfer penalty. Each paid transfer costs 4 points, exactly as in FPL.
 
-> **For the non-technical reader:** The formula simply says "add up all the expected points from starters, double the captain's points, and subtract 4 for every extra transfer you use."
+> **For the non-technical reader:** This formula captures the big picture for the entire timeframe you’re planning for—whether that’s just the next 10 gameweeks or the whole rest of the season. It adds up all the expected points from your starting players across every week in your chosen horizon, doubles the captain’s points each gameweek, and subtracts 4 points for every paid transfer you make. In other words, it’s optimizing your total score over your whole planning period, not just for a single gameweek.
 
 ### The Constraints
 
@@ -274,7 +274,7 @@ Of course, this varies by manager. Your remaining chips, current squad, budget, 
 
 A confession: this is actually my first season playing FPL. Even though I like football, I didn't really follow the Premier League that closely before this project. I knew the top clubs, recognized the big-name players, but that was about it. With so little domain knowledge, I did something naive at the start: I took the FPL player prices as a proxy for expected performance, assuming the organizers had done the hard work of encoding quality into price. That was my "prediction engine" for the first few weeks. Simple, arguably stupid, but it was a starting point.
 
-Around **Gameweek 7**, I plugged in the MILP solver and the component-based prediction engine described in Part 2. I don't blindly follow the solver's output — I use it as a **co-pilot**, not an autopilot.
+Unfortunately, it wasn't until **Gameweek 7** that I finished developing and integrated the MILP solver into my workflow. Up to that point, I was relying solely on my point prediction model, using a very basic and greedy long-term optimizer to guide my decisions. Now, with the MILP solver (plus the component-based prediction engine covered in Part 2), I've upgraded from that simple approach—but even so, I treat the solver as a **co-pilot**, not an autopilot.
 
 My typical workflow:
 1. Run the solver with the base config
@@ -313,4 +313,8 @@ It fetches your squad from the FPL API, generates predictions, and outputs the o
 
 ---
 
-*Next up — **Part 2: The Prediction Engine.** How do you turn raw Premier League data into expected FPL points? It involves Poisson distributions, fixture difficulty multipliers, and a lot of normalization. Stay tuned.*
+*Next up — **Part 2: The Prediction Engine.** How do we transform raw Premier League data into accurate expected FPL points? It all starts with the rich "expected goals" (xG), "expected assists" (xA), and other advanced stats that the FPL API makes freely available for every player — a goldmine that lets us go far beyond basic past points.*
+
+*Our prediction engine learns from past seasons and breaks down every possible way a player can earn FPL points: scoring, assisting, clean sheets, defensive contributions, bonus points, etc. For each of these components, we build separate predictive models that account for not just player quality, but also the future difficulty of every fixture.*
+
+*The result: granular, component-wise point forecasts for every player, every GW, grounded both in stats and in real-world fixture context. Stay tuned for all the details.*

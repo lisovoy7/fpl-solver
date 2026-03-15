@@ -83,6 +83,25 @@ def create_watchlist(
     must_include_df = merged[include_mask]
     remaining = merged[~include_mask]
 
+    # 6b. Add must_include players that have no predictions (e.g. bench GKs
+    #     who never played 60+ min).  They need to be in the solver's player
+    #     pool so initial-squad constraints stay feasible.
+    missing_ids = set(must_include) - set(merged["element"].tolist())
+    if missing_ids:
+        gw_col_local = "GW" if "GW" in gw_data.columns else None
+        sort_cols_local = ["element"] + ([gw_col_local] if gw_col_local else [])
+        latest_gw = gw_data.sort_values(sort_cols_local).groupby("element").last().reset_index()
+        missing_rows = latest_gw[latest_gw["element"].isin(missing_ids)][["element", "value"]].copy()
+        missing_rows["predicted_points"] = 0.0
+        missing_rows["hist_games"] = 0
+        missing_rows["recent_hist_games"] = 0
+        missing_rows = missing_rows.rename(columns={"value": "cost"})
+        must_include_df = pd.concat([must_include_df, missing_rows], ignore_index=True)
+        logger.info(
+            "Added %d must-include players missing from predictions: %s",
+            len(missing_ids), sorted(missing_ids),
+        )
+
     # 7. Filter remaining by recent_hist_games >= min_hist_games
     filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
 
