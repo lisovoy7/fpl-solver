@@ -91,7 +91,7 @@ def generate_chip_scenarios(
         fh_scenarios: List[Dict] = [
             {"name": f"FH GW{force_free_hit_gw}", "free_hit_gws": [force_free_hit_gw]},
         ]
-        logger.info("Free Hit forced on GW %d — skipping FH enumeration", force_free_hit_gw)
+        logger.debug("Free Hit forced on GW %d — skipping FH enumeration", force_free_hit_gw)
     else:
         remaining_fh_first = max(0, 1 - free_hits_used_first_half)
         remaining_fh_second = max(0, 1 - free_hits_used_second_half)
@@ -113,7 +113,7 @@ def generate_chip_scenarios(
     # --- BB options ---
     if force_bench_boost_gw is not None:
         bb_options: List[int] = [force_bench_boost_gw]
-        logger.info("Bench Boost forced on GW %d — skipping BB enumeration", force_bench_boost_gw)
+        logger.debug("Bench Boost forced on GW %d — skipping BB enumeration", force_bench_boost_gw)
     else:
         bb_options = [-1]
         bb_options.extend(_half_season_chip_options(
@@ -124,7 +124,7 @@ def generate_chip_scenarios(
     # --- TC options ---
     if force_triple_captain_gw is not None:
         tc_options: List[int] = [force_triple_captain_gw]
-        logger.info("Triple Captain forced on GW %d — skipping TC enumeration", force_triple_captain_gw)
+        logger.debug("Triple Captain forced on GW %d — skipping TC enumeration", force_triple_captain_gw)
     else:
         tc_options = [-1]
         tc_options.extend(_half_season_chip_options(
@@ -201,7 +201,7 @@ def calculate_optimal_free_hit_squad(
         Dict with: status, squad, lineup, captain, total_points, squad_cost,
         unused_budget, squad_details.
     """
-    logger.info("Calculating optimal Free Hit squad for GW %d", gw)
+    logger.debug("Calculating optimal Free Hit squad for GW %d", gw)
 
     # Filter predictions for target GW and watchlist
     gw_predictions = predictions_df[
@@ -239,7 +239,7 @@ def calculate_optimal_free_hit_squad(
         }
     ).reset_index()
 
-    logger.info("Found %d unique players with predictions for GW %d", len(gw_data), gw)
+    logger.debug("Found %d unique players with predictions for GW %d", len(gw_data), gw)
 
     # Apply points_multiplier_override
     if points_multiplier_override:
@@ -266,7 +266,7 @@ def calculate_optimal_free_hit_squad(
     solution = _solve_free_hit_milp(gw_data, budget, forced_players, gw)
 
     if solution["status"] == "Optimal":
-        logger.info(
+        logger.debug(
             "Optimal Free Hit squad found: %.1f points", solution["total_points"]
         )
     else:
@@ -400,7 +400,7 @@ def calculate_free_hit_benefits_for_horizon(
     Returns:
         Dict mapping gameweek -> FH result dict.
     """
-    logger.info(
+    logger.debug(
         "Pre-calculating Free Hit benefits for GW %d-%d",
         start_gw,
         start_gw + planning_horizon - 1,
@@ -422,7 +422,7 @@ def calculate_free_hit_benefits_for_horizon(
             )
             fh_benefits[gw] = fh_result
             if fh_result["total_points"] > 0:
-                logger.info(
+                logger.debug(
                     "  GW %d: %.1f points (%.1fM squad)",
                     gw,
                     fh_result["total_points"],
@@ -443,5 +443,5 @@ def calculate_free_hit_benefits_for_horizon(
                 "squad_details": {},
             }
 
-    logger.info("Pre-calculated Free Hit benefits for %d gameweeks", len(fh_benefits))
+    logger.debug("Pre-calculated Free Hit benefits for %d gameweeks", len(fh_benefits))
     return fh_benefits

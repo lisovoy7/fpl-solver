@@ -43,13 +43,12 @@ pip install -r requirements.txt
 python run.py
 ```
 
-First run takes a few minutes because it fetches per-player stats from the FPL API (~900 players). Subsequent runs with `--skip-predictions` reuse cached predictions.
+First run takes a few minutes because it fetches per-player stats from the FPL API (~900 players). Subsequent runs reuse cached gameweek data (if fresh enough) but always regenerate predictions with the latest fixtures.
 
 ### CLI Flags
 
 | Flag | Description |
 |---|---|
-| `--skip-predictions` | Reuse `output/predictions.csv` from a previous run |
 | `--horizon N` | Override planning horizon (default: rest of season) |
 | `--no-chips` | Disable chip optimization (faster, no FH/BB/TC) |
 | `--config PATH` | Use a different config file |

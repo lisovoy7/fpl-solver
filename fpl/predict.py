@@ -69,11 +69,11 @@ def _normalize_stats(
     Filters to minutes >= MIN_MINUTES, merges with fixtures for team info,
     adds team tiers, and normalizes each component by dividing by fixture multiplier.
     """
-    logger.info("Normalizing stats for season %s", season)
+    logger.debug("Normalizing stats for season %s", season)
 
     filtered = gw_data[gw_data["minutes"] >= MIN_MINUTES].copy()
     filtered["season"] = season
-    logger.info("Filtered to %d records with minutes >= %d", len(filtered), MIN_MINUTES)
+    logger.debug("Filtered to %d records with minutes >= %d", len(filtered), MIN_MINUTES)
 
     # Merge with fixtures
     gw_data_copy = filtered.copy()
@@ -155,7 +155,7 @@ def _normalize_stats(
         )
         merged = merged.drop(columns=[mult_col], errors="ignore")
 
-    logger.info("Normalization complete: %d records", len(merged))
+    logger.debug("Normalization complete: %d records", len(merged))
     return merged
 
 
@@ -167,7 +167,7 @@ def _calculate_player_averages(
     """
     Calculate player averages from last N games (normalized and raw components).
     """
-    logger.info("Calculating player averages from last %d games", last_n_games)
+    logger.debug("Calculating player averages from last %d games", last_n_games)
 
     gw_filtered = gw_data[gw_data["minutes"] >= MIN_MINUTES].copy()
     gw_filtered["kickoff_time"] = pd.to_datetime(gw_filtered["kickoff_time"])
@@ -233,19 +233,19 @@ def _calculate_player_averages(
         )
 
     df = pd.DataFrame(records)
-    logger.info("Calculated averages for %d players", len(df))
+    logger.debug("Calculated averages for %d players", len(df))
     return df
 
 
 def _get_player_team_assignments(normalized_stats: pd.DataFrame) -> pd.DataFrame:
     """Get latest team assignment per player from normalized stats."""
-    logger.info("Determining player team assignments")
+    logger.debug("Determining player team assignments")
     sorted_stats = normalized_stats.sort_values(["element", "kickoff_time"])
     latest = sorted_stats.groupby("element").last().reset_index()
     assignments = latest[
         ["element", "name", "position", "player_team_id", "player_team_tier"]
     ].copy()
-    logger.info("Team assignments for %d players", len(assignments))
+    logger.debug("Team assignments for %d players", len(assignments))
     return assignments
 
 
@@ -258,7 +258,7 @@ def _generate_player_fixture_combinations(
     """
     Generate player-fixture combinations for future fixtures only.
     """
-    logger.info("Generating player-fixture combinations (future fixtures only)")
+    logger.debug("Generating player-fixture combinations (future fixtures only)")
 
     fixtures_copy = fixtures.copy()
     fixtures_copy["kickoff_time"] = pd.to_datetime(fixtures_copy["kickoff_time"])
@@ -271,7 +271,7 @@ def _generate_player_fixture_combinations(
     future_fixtures = fixtures_copy[
         fixtures_copy[event_col] > last_played_gw
     ].copy()
-    logger.info("Future fixtures: %d (event > %d)", len(future_fixtures), last_played_gw)
+    logger.debug("Future fixtures: %d (event > %d)", len(future_fixtures), last_played_gw)
 
     combinations = []
     for _, prow in player_assignments.iterrows():
@@ -307,7 +307,7 @@ def _generate_player_fixture_combinations(
             )
 
     comb_df = pd.DataFrame(combinations)
-    logger.info("Created %d player-fixture combinations", len(comb_df))
+    logger.debug("Created %d player-fixture combinations", len(comb_df))
     return comb_df
 
 
@@ -584,7 +584,7 @@ def _create_component_predictions(
         result.append(df[cols].copy())
 
     out = pd.concat(result, ignore_index=True)
-    logger.info("Created %d total predictions across %d components", len(out), len(all_preds))
+    logger.debug("Created %d total predictions across %d components", len(out), len(all_preds))
     return out
 
 

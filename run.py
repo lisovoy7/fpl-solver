@@ -8,7 +8,6 @@ output/strategy_gw{N}.json.
 
 Usage:
     python run.py
-    python run.py --skip-predictions
     python run.py --horizon 5
     python run.py --no-chips
 """
@@ -38,8 +37,6 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="fpl-solver: holistic FPL optimization")
-    parser.add_argument("--skip-predictions", action="store_true",
-                        help="Skip prediction generation, use cached predictions.csv")
     parser.add_argument("--horizon", type=int, default=None,
                         help="Override planning horizon (number of GWs)")
     parser.add_argument("--no-chips", action="store_true",
@@ -454,17 +451,13 @@ def main() -> None:
     else:
         logger.info("GW data: %d records (from cache)", len(gw_data))
 
-    if args.skip_predictions and predictions_path.exists():
-        logger.info("Loading cached predictions from %s", predictions_path)
-        predictions = pd.read_csv(predictions_path)
-    else:
-        logger.info("Generating predictions...")
-        predictions = generate_predictions(gw_data, fixtures, multipliers,
-                                           current_season_tiers, season)
+    logger.info("Generating predictions...")
+    predictions = generate_predictions(gw_data, fixtures, multipliers,
+                                       current_season_tiers, season)
 
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        predictions.to_csv(predictions_path, index=False)
-        logger.info("Saved predictions to %s (%d rows)", predictions_path, len(predictions))
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    predictions.to_csv(predictions_path, index=False)
+    logger.info("Saved predictions to %s (%d rows)", predictions_path, len(predictions))
 
     # 5. Build watchlist
     must_include = list(current_squad)
@@ -476,7 +469,6 @@ def main() -> None:
     watchlist = create_watchlist(predictions, gw_data, min_hist_games=min_hist_games,
                                 min_hist_window=min_hist_window,
                                 must_include=must_include, must_exclude=must_exclude)
-    logger.info("Watchlist: %d players", len(watchlist))
 
     # 6. Chip scenarios
     wildcards_used = chips_cfg.get("wildcards_used", 0)
@@ -522,7 +514,6 @@ def main() -> None:
         logger.warning("Limiting scenarios from %d to %d", len(chip_scenarios), max_scenarios)
         chip_scenarios = chip_scenarios[:max_scenarios]
 
-    # Pre-calculate Free Hit benefits
     fh_benefits: Dict = {}
     any_fh = any(s["free_hit_gws"] for s in chip_scenarios)
     if any_fh:
@@ -544,15 +535,15 @@ def main() -> None:
     if args.time_limit is not None:
         time_limit = args.time_limit
 
-    logger.info("Testing %d chip scenarios...", len(chip_scenarios))
+    total_scenarios = len(chip_scenarios)
+    logger.info("Solving %d chip scenarios (time limit: %ds per scenario)...", total_scenarios, time_limit)
     start_time = time.time()
     best_result = None
     best_total = -float("inf")
     scenario_results = []
+    failed_count = 0
 
     for idx, scenario in enumerate(chip_scenarios, 1):
-        logger.info("--- Scenario %d/%d: %s ---", idx, len(chip_scenarios), scenario["name"])
-
         solver = FPLSolver(
             planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
             afcon_enabled=transfer_topup.get("enabled", True),
@@ -571,7 +562,8 @@ def main() -> None:
 
         solver.load_predictions(predictions)
         if len(solver.predictions) == 0:
-            logger.error("No predictions found for GW %d+", current_gw)
+            logger.warning("[%d/%d] No predictions — skipped", idx, total_scenarios)
+            failed_count += 1
             continue
 
         solver.load_player_data(gw_data, predictions, player_subset=watchlist)
@@ -584,7 +576,8 @@ def main() -> None:
         solver.build_model()
         success = solver.solve(time_limit=time_limit)
         if not success:
-            logger.warning("Solver failed for: %s", scenario["name"])
+            failed_count += 1
+            logger.info("[%d/%d] %-40s  INFEASIBLE", idx, total_scenarios, scenario["name"])
             continue
 
         solution = solver.extract_solution()
@@ -610,16 +603,18 @@ def main() -> None:
         }
         scenario_results.append(result)
 
-        if total_points > best_total:
+        is_new_best = total_points > best_total
+        if is_new_best:
             best_result = result
             best_total = total_points
-            logger.info("New best: %.1f pts (%s)", total_points, scenario["name"])
-        else:
-            logger.info("Result: %.1f pts", total_points)
+
+        marker = " ★ BEST" if is_new_best else ""
+        logger.info("[%d/%d] %-40s  %.1f pts%s",
+                    idx, total_scenarios, scenario["name"], total_points, marker)
 
     elapsed = time.time() - start_time
-    logger.info("Chip enumeration: %d/%d solved in %.0fs",
-                len(scenario_results), len(chip_scenarios), elapsed)
+    logger.info("Done: %d/%d solved, %d failed in %.0fs",
+                len(scenario_results), total_scenarios, failed_count, elapsed)
 
     if not best_result:
         logger.error("No optimal solution found in any scenario")

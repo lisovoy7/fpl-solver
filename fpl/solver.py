@@ -108,7 +108,7 @@ class FPLSolver:
         self.prob = None
         self.variables = {}
 
-        logger.info("Initialized FPL solver with %d GW horizon", planning_horizon)
+        logger.debug("Initialized FPL solver with %d GW horizon", planning_horizon)
 
     def load_predictions(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -122,7 +122,7 @@ class FPLSolver:
         Returns:
             DataFrame with aggregated predictions.
         """
-        logger.info("Loading predictions from DataFrame")
+        logger.debug("Loading predictions from DataFrame")
 
         predictions = predictions_df.copy()
         end_gw = self.start_gw + self.T - 1
@@ -141,8 +141,8 @@ class FPLSolver:
         self._apply_points_multiplier_override()
         self._apply_free_hit_points_override()
 
-        logger.info("Loaded predictions for %d players", self.predictions['element'].nunique())
-        logger.info("Gameweeks: %s", sorted(self.predictions['event'].unique()))
+        logger.debug("Loaded predictions for %d players", self.predictions['element'].nunique())
+        logger.debug("Gameweeks: %s", sorted(self.predictions['event'].unique()))
 
         return self.predictions
 
@@ -151,7 +151,7 @@ class FPLSolver:
         if not self.points_multiplier_override:
             return
 
-        logger.info("Applying points multiplier overrides")
+        logger.debug("Applying points multiplier overrides")
 
         for player_id, multiplier in self.points_multiplier_override:
             player_mask = self.predictions['element'] == player_id
@@ -162,7 +162,7 @@ class FPLSolver:
                 self.predictions.loc[player_mask, 'predicted_points'] *= multiplier
                 new_total = self.predictions.loc[player_mask, 'predicted_points'].sum()
                 player_name = affected_rows.iloc[0].get('name', player_id)
-                logger.info(
+                logger.debug(
                     "  Player %d (%s): %.1fx multiplier applied, total %.1f -> %.1f",
                     player_id, player_name, multiplier, original_total, new_total,
                 )
@@ -174,7 +174,7 @@ class FPLSolver:
         if not self.free_hit_gws:
             return
 
-        logger.info("Applying Free Hit points override (set to 0) for GWs: %s", self.free_hit_gws)
+        logger.debug("Applying Free Hit points override (set to 0) for GWs: %s", self.free_hit_gws)
 
         for fh_gw in self.free_hit_gws:
             gw_mask = self.predictions['event'] == fh_gw
@@ -183,7 +183,7 @@ class FPLSolver:
             if len(affected_rows) > 0:
                 original_total = self.predictions.loc[gw_mask, 'predicted_points'].sum()
                 self.predictions.loc[gw_mask, 'predicted_points'] = 0
-                logger.info("  GW %d: %d players set to 0 points (was %.1f total)", fh_gw, len(affected_rows), original_total)
+                logger.debug("  GW %d: %d players set to 0 points (was %.1f total)", fh_gw, len(affected_rows), original_total)
             else:
                 logger.warning("  GW %d: No predictions found for Free Hit override", fh_gw)
 
@@ -204,7 +204,7 @@ class FPLSolver:
         Returns:
             DataFrame with element, name, position, value, team.
         """
-        logger.info("Loading player metadata from DataFrames")
+        logger.debug("Loading player metadata from DataFrames")
 
         gw_col = next((c for c in ['GW', 'event', 'round'] if c in gw_data.columns), None)
         if gw_col is None:
@@ -244,9 +244,9 @@ class FPLSolver:
 
         if player_subset is not None:
             self.players = self.players[self.players['element'].isin(player_subset)].copy()
-            logger.info("Filtered to %d players from subset", len(self.players))
+            logger.debug("Filtered to %d players from subset", len(self.players))
 
-        logger.info("Loaded data for %d players", len(self.players))
+        logger.debug("Loaded data for %d players", len(self.players))
         return self.players
 
     def set_initial_squad(self, squad_player_ids: List[int], available_transfers: int = 1) -> None:
@@ -274,8 +274,8 @@ class FPLSolver:
                     len(missing), missing,
                 )
 
-        logger.info("Set initial squad with %d players", len(squad_player_ids))
-        logger.info("Available transfers: %d", available_transfers)
+        logger.debug("Set initial squad with %d players", len(squad_player_ids))
+        logger.debug("Available transfers: %d", available_transfers)
 
     def set_chip_state(
         self,
@@ -294,11 +294,11 @@ class FPLSolver:
             'wildcard_second_half': wildcard_second_half,
         }
 
-        logger.info("Chip state set: first half wildcards %d/1, second half %d/1", wildcard_first_half, wildcard_second_half)
+        logger.debug("Chip state set: first half wildcards %d/1, second half %d/1", wildcard_first_half, wildcard_second_half)
 
     def create_decision_variables(self) -> None:
         """Create all MILP decision variables."""
-        logger.info("Creating MILP decision variables")
+        logger.debug("Creating MILP decision variables")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
@@ -357,11 +357,11 @@ class FPLSolver:
         variables['wildcard'] = pulp.LpVariable.dicts("wildcard", gameweeks, cat='Binary')
 
         self.variables = variables
-        logger.info("Created all decision variables")
+        logger.debug("Created all decision variables")
 
     def create_objective(self) -> None:
         """Create the objective function to maximize total expected points."""
-        logger.info("Creating objective function")
+        logger.debug("Creating objective function")
 
         if self.predictions is None:
             raise ValueError("Predictions must be loaded before creating objective")
@@ -385,16 +385,16 @@ class FPLSolver:
         bench_complement = 1.0 - bench_weight
 
         if self.sub_probability > 0:
-            logger.info(
+            logger.debug(
                 "Bench valuation enabled: sub_probability=%.2f, lineup weight=%.2f, bench weight=%.2f",
                 self.sub_probability, lineup_weight, bench_weight,
             )
 
         if self.bench_boost_gw > 0:
-            logger.info("Bench Boost enabled for GW %d", self.bench_boost_gw)
+            logger.debug("Bench Boost enabled for GW %d", self.bench_boost_gw)
 
         if self.triple_captain_gw > 0:
-            logger.info("Triple Captain enabled for GW %d", self.triple_captain_gw)
+            logger.debug("Triple Captain enabled for GW %d", self.triple_captain_gw)
 
         for t in gameweeks:
             actual_gw = self.start_gw + t - 1
@@ -445,11 +445,11 @@ class FPLSolver:
                 )
 
         self.prob += pulp.lpSum(objective_terms), "Total_Expected_Points"
-        logger.info("Objective function created")
+        logger.debug("Objective function created")
 
     def add_squad_flow_constraints(self) -> None:
         """Add constraints for squad ownership flow and transfers."""
-        logger.info("Adding squad flow constraints")
+        logger.debug("Adding squad flow constraints")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
@@ -478,7 +478,7 @@ class FPLSolver:
         # Free Hit GWs: freeze the real squad — no transfers in or out.
         # The FH sub-problem picks an independent optimal squad for that GW.
         if fh_internal_gws:
-            logger.info("Freezing squad flow for Free Hit GWs: %s", sorted(
+            logger.debug("Freezing squad flow for Free Hit GWs: %s", sorted(
                 self.start_gw + t - 1 for t in fh_internal_gws))
             for t in fh_internal_gws:
                 for p in players:
@@ -495,17 +495,17 @@ class FPLSolver:
                 f"Transfer_Count_Out_{t}",
             )
 
-        logger.info("Squad flow constraints added")
+        logger.debug("Squad flow constraints added")
 
     def add_transfer_banking_constraints(self) -> None:
         """Add constraints for transfer banking and usage."""
-        logger.info("Adding transfer banking constraints")
+        logger.debug("Adding transfer banking constraints")
 
         gameweeks = list(range(1, self.T + 1))
 
         if self.afcon_enabled and self.start_gw == self.afcon_trigger_gw + 1:
             effective_initial_transfers = self.afcon_transfer_count
-            logger.info("AFCON rule applied: initial transfers set to %d", effective_initial_transfers)
+            logger.debug("AFCON rule applied: initial transfers set to %d", effective_initial_transfers)
         else:
             effective_initial_transfers = self.initial_transfers
 
@@ -543,11 +543,11 @@ class FPLSolver:
             )
             self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
 
-        logger.info("Transfer banking constraints added")
+        logger.debug("Transfer banking constraints added")
 
     def add_squad_composition_constraints(self) -> None:
         """Add squad composition and budget constraints."""
-        logger.info("Adding squad composition constraints")
+        logger.debug("Adding squad composition constraints")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
@@ -579,11 +579,11 @@ class FPLSolver:
                         f"Club_{club}_{t}",
                     )
 
-        logger.info("Squad composition constraints added")
+        logger.debug("Squad composition constraints added")
 
     def add_lineup_constraints(self) -> None:
         """Add lineup selection constraints."""
-        logger.info("Adding lineup constraints")
+        logger.debug("Adding lineup constraints")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
@@ -619,22 +619,22 @@ class FPLSolver:
                     f"Captain_Starter_{p}_{t}",
                 )
 
-        logger.info("Lineup constraints added")
+        logger.debug("Lineup constraints added")
 
     def add_advanced_constraints(self) -> None:
         """Add advanced constraints (forced lineup, non-playing, BGW)."""
-        logger.info("Adding advanced constraints")
+        logger.debug("Adding advanced constraints")
         self._add_forced_lineup_constraints()
         self._add_non_playing_player_constraints()
         self._add_bgw_constraints()
-        logger.info("Advanced constraints added")
+        logger.debug("Advanced constraints added")
 
     def _add_forced_lineup_constraints(self) -> None:
         """Add constraints to force specific players to start."""
         if not self.forced_lineup_players:
             return
 
-        logger.info("Adding forced lineup constraints")
+        logger.debug("Adding forced lineup constraints")
 
         for player_id, forced_gws in self.forced_lineup_players:
             player_name = "Unknown"
@@ -656,7 +656,7 @@ class FPLSolver:
                         self.variables['y'][(player_id, internal_gw)] == 1,
                         f"Forced_Lineup_{player_id}_GW{gw}",
                     )
-                    logger.info("  Player %d (%s) forced to start in GW %d", player_id, player_name, gw)
+                    logger.debug("  Player %d (%s) forced to start in GW %d", player_id, player_name, gw)
                 else:
                     logger.warning(
                         "  Player %d forced lineup for GW %d outside planning horizon",
@@ -668,7 +668,7 @@ class FPLSolver:
         if not self.non_playing_players:
             return
 
-        logger.info("Adding non-playing player constraints (0 points override)")
+        logger.debug("Adding non-playing player constraints (0 points override)")
 
         for player_id, non_playing_gws in self.non_playing_players:
             player_name = "Unknown"
@@ -680,7 +680,7 @@ class FPLSolver:
             for gw in non_playing_gws:
                 internal_gw = gw - self.start_gw + 1
                 if 1 <= internal_gw <= self.T:
-                    logger.info("  Player %d (%s) will get 0 points in GW %d", player_id, player_name, gw)
+                    logger.debug("  Player %d (%s) will get 0 points in GW %d", player_id, player_name, gw)
                 else:
                     logger.warning(
                         "  Player %d non-playing override for GW %d outside planning horizon",
@@ -707,10 +707,10 @@ class FPLSolver:
                     bgw_by_gw[actual_gw].append(p)
 
         if not bgw_combinations:
-            logger.info("No Blank Game Weeks detected")
+            logger.debug("No Blank Game Weeks detected")
             return
 
-        logger.info("Detected %d BGW player-GW combinations", len(bgw_combinations))
+        logger.debug("Detected %d BGW player-GW combinations", len(bgw_combinations))
         constraints_added = 0
         for p, t, actual_gw in bgw_combinations:
             if (p, t) in self.variables['y']:
@@ -720,11 +720,11 @@ class FPLSolver:
                 self.prob += (self.variables['c'][(p, t)] == 0, f"BGW_No_Captain_{p}_GW{actual_gw}")
                 constraints_added += 1
 
-        logger.info("Added %d BGW constraints", constraints_added)
+        logger.debug("Added %d BGW constraints", constraints_added)
 
     def add_chip_constraints(self) -> None:
         """Add chip usage constraints."""
-        logger.info("Adding chip constraints")
+        logger.debug("Adding chip constraints")
 
         gameweeks = list(range(1, self.T + 1))
         chips_used = getattr(self, 'chips_used', {})
@@ -769,7 +769,7 @@ class FPLSolver:
                             self.variables['wildcard'][t] == 0,
                             f"No_Wildcard_Other_GW{self.start_gw + t - 1}",
                         )
-                logger.info("  Wildcard forced on GW %d", self.force_wildcard_gw)
+                logger.debug("  Wildcard forced on GW %d", self.force_wildcard_gw)
 
         if self.bench_boost_gw > 0:
             bb_internal = self.bench_boost_gw - self.start_gw + 1
@@ -778,7 +778,7 @@ class FPLSolver:
                     self.variables['wildcard'][bb_internal] == 0,
                     f"No_Wildcard_BenchBoost_GW{self.bench_boost_gw}",
                 )
-                logger.info("  Wildcard blocked in GW %d (Bench Boost)", self.bench_boost_gw)
+                logger.debug("  Wildcard blocked in GW %d (Bench Boost)", self.bench_boost_gw)
 
         if self.triple_captain_gw > 0:
             tc_internal = self.triple_captain_gw - self.start_gw + 1
@@ -787,7 +787,7 @@ class FPLSolver:
                     self.variables['wildcard'][tc_internal] == 0,
                     f"No_Wildcard_TripleCaptain_GW{self.triple_captain_gw}",
                 )
-                logger.info("  Wildcard blocked in GW %d (Triple Captain)", self.triple_captain_gw)
+                logger.debug("  Wildcard blocked in GW %d (Triple Captain)", self.triple_captain_gw)
 
         for fh_gw in self.free_hit_gws:
             fh_internal = fh_gw - self.start_gw + 1
@@ -796,7 +796,7 @@ class FPLSolver:
                     self.variables['wildcard'][fh_internal] == 0,
                     f"No_Wildcard_FreeHit_GW{fh_gw}",
                 )
-                logger.info("  Wildcard blocked in GW %d (Free Hit)", fh_gw)
+                logger.debug("  Wildcard blocked in GW %d (Free Hit)", fh_gw)
 
         M_transfers = 15
         for t in gameweeks:
@@ -828,11 +828,11 @@ class FPLSolver:
                 f"First_GW_Penalty_Lower_{t}",
             )
 
-        logger.info("Chip constraints added")
+        logger.debug("Chip constraints added")
 
     def build_model(self) -> None:
         """Build the complete MILP model."""
-        logger.info("Building complete MILP model")
+        logger.debug("Building complete MILP model")
 
         self.prob = pulp.LpProblem("FPL_Optimization", pulp.LpMaximize)
         self.create_decision_variables()
@@ -844,8 +844,8 @@ class FPLSolver:
         self.add_chip_constraints()
         self.add_advanced_constraints()
 
-        logger.info("MILP model built successfully")
-        logger.info("Variables: %d, Constraints: %d", len(self.prob.variables()), len(self.prob.constraints))
+        logger.debug("MILP model built: %d vars, %d constraints",
+                     len(self.prob.variables()), len(self.prob.constraints))
 
     def solve(self, time_limit: Optional[int] = None) -> bool:
         """
@@ -857,24 +857,24 @@ class FPLSolver:
         Returns:
             True if optimal solution found, False otherwise.
         """
-        logger.info("Solving MILP with %s", self.solver_name)
+        logger.debug("Solving MILP with %s", self.solver_name)
 
         if self.prob is None:
             raise ValueError("Model must be built before solving")
 
         if self.solver_name.upper() == 'CBC':
-            solver = pulp.PULP_CBC_CMD(msg=1, timeLimit=time_limit)
+            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
         elif self.solver_name.upper() == 'GUROBI':
-            solver = pulp.GUROBI_CMD(msg=1, timeLimit=time_limit)
+            solver = pulp.GUROBI_CMD(msg=0, timeLimit=time_limit)
         else:
-            solver = pulp.PULP_CBC_CMD(msg=1, timeLimit=time_limit)
+            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
 
         self.prob.solve(solver)
         status = pulp.LpStatus[self.prob.status]
-        logger.info("Solver status: %s", status)
+        logger.debug("Solver status: %s", status)
 
         if self.prob.status == pulp.LpStatusOptimal:
-            logger.info("Optimal objective value: %.2f", pulp.value(self.prob.objective))
+            logger.debug("Optimal objective value: %.2f", pulp.value(self.prob.objective))
             return True
         else:
             logger.warning("No optimal solution found")
@@ -891,7 +891,7 @@ class FPLSolver:
         if self.prob.status != pulp.LpStatusOptimal:
             raise ValueError("Model must be solved optimally before extracting solution")
 
-        logger.info("Extracting solution")
+        logger.debug("Extracting solution")
 
         solution = {
             'objective_value': float(pulp.value(self.prob.objective)),
@@ -959,5 +959,5 @@ class FPLSolver:
                 chips_used.append('free_hit')
             solution['chips'][t] = chips_used
 
-        logger.info("Solution extracted successfully")
+        logger.debug("Solution extracted successfully")
         return solution
