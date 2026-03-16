@@ -36,8 +36,11 @@ cd fpl-solver
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Edit config.yaml with your team ID and free transfers
-#    (see Configuration Reference below)
+# 3. Create your local config (not tracked in git)
+cat > config.local.yaml << 'EOF'
+team_id: YOUR_TEAM_ID
+free_transfers: 2
+EOF
 
 # 4. Run
 python run.py
@@ -62,6 +65,23 @@ First run takes a few minutes because it fetches per-player stats from the FPL A
 ## Configuration Reference
 
 All parameters live in `config.yaml`. Below is a complete reference for every parameter.
+
+### Local Overrides (`config.local.yaml`)
+
+To customize settings without modifying the tracked `config.yaml`, create a `config.local.yaml` file in the project root. Values are deep-merged on top of the defaults — you only need to include keys you want to change.
+
+```yaml
+# config.local.yaml — gitignored, your personal settings
+team_id: 1234567
+free_transfers: 2
+chips:
+  force_free_hit_gw: 33
+non_playing:
+  - player: 661
+    gameweeks: [28, 29]
+```
+
+Nested sections (like `solver`, `chips`) are merged recursively: setting `solver.max_scenarios: 50` in the local file won't affect other solver params. Lists (like `fixture_overrides`, `non_playing`) are replaced entirely if present in the local file.
 
 ### Required Parameters
 

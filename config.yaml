@@ -1,7 +1,16 @@
 # ============================================================================
 # fpl-solver configuration
 # ============================================================================
-# This is the only file you need to edit before running the solver.
+# Default settings for the solver. To override any value without editing this
+# file, create a config.local.yaml in the same directory with just the keys
+# you want to change. Local overrides are deep-merged on top of these defaults.
+#
+# Example config.local.yaml:
+#   team_id: 1234567
+#   free_transfers: 2
+#   solver:
+#     max_scenarios: 50
+#
 # See README.md for full documentation of every parameter.
 
 # ---------- Required ----------

@@ -5,6 +5,10 @@ Loads config.yaml from the project root, applies sensible defaults for optional
 fields, validates required fields (team_id, free_transfers), and provides helpers
 to extract solver params and player overrides in the format expected by the solver.
 Supports merging auto-detected values (current_gw, chips_used) from the FPL API.
+
+Local overrides: if config.local.yaml exists next to config.yaml, its values are
+deep-merged on top — letting users customize team_id, chips, fixture_overrides etc.
+without touching the tracked config.yaml.
 """
 
 import logging
@@ -15,7 +19,6 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# Project root: parent of fpl/ package (same level as run.py)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Default values for optional config sections
@@ -35,9 +38,37 @@ _DEFAULT_TRANSFER_TOPUP = {
 }
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """
+    Recursively merge override dict into base dict.
+
+    For nested dicts, values are merged recursively. For all other types
+    (including lists), the override value replaces the base value entirely.
+
+    Args:
+        base: Base dictionary (not mutated).
+        override: Override dictionary whose values take precedence.
+
+    Returns:
+        New merged dictionary.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
     """
-    Load config from YAML file at project root.
+    Load config from YAML file, then apply local overrides if present.
+
+    Looks for a matching .local.yaml file next to the base config
+    (e.g. config.yaml -> config.local.yaml) and deep-merges any values
+    found there on top. This lets users keep personal settings (team_id,
+    chips, fixture_overrides) outside of version control.
 
     Args:
         config_path: Path to config file, relative to project root.
@@ -46,7 +77,7 @@ def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
         Merged config dict with defaults applied.
 
     Raises:
-        FileNotFoundError: If config file does not exist.
+        FileNotFoundError: If base config file does not exist.
         ValueError: If required fields (team_id, free_transfers) are missing.
     """
     full_path = _PROJECT_ROOT / config_path
@@ -55,6 +86,16 @@ def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
 
     with open(full_path) as f:
         raw = yaml.safe_load(f) or {}
+
+    local_path = full_path.parent / (full_path.stem + ".local.yaml")
+    if local_path.exists():
+        with open(local_path) as f:
+            local_raw = yaml.safe_load(f) or {}
+        raw = _deep_merge(raw, local_raw)
+        overridden_keys = list(local_raw.keys())
+        logger.info("Applied local overrides from %s (keys: %s)", local_path, ", ".join(overridden_keys))
+    else:
+        logger.debug("No local config found at %s", local_path)
 
     config = _apply_defaults(raw)
     _validate_required(config)

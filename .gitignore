@@ -10,3 +10,4 @@ build/
 .idea/
 .vscode/
 *.csv.bak
+config.local.yaml
