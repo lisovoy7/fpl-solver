@@ -546,7 +546,13 @@ class FPLSolver:
         logger.debug("Transfer banking constraints added")
 
     def add_squad_composition_constraints(self) -> None:
-        """Add squad composition and budget constraints."""
+        """Add squad composition and budget constraints.
+
+        Budget constraint is skipped on Free Hit GWs because the real squad is
+        frozen and no money changes hands.  Players may have appreciated above
+        their selling price, making the market-value sum exceed the budget —
+        that is expected and not a real constraint violation.
+        """
         logger.debug("Adding squad composition constraints")
 
         players = self.players['element'].tolist()
@@ -555,15 +561,22 @@ class FPLSolver:
         player_price = dict(zip(self.players['element'], self.players['value']))
         player_club = dict(zip(self.players['element'], self.players['team']))
 
+        fh_internal_gws = {
+            gw - self.start_gw + 1
+            for gw in self.free_hit_gws
+            if 1 <= gw - self.start_gw + 1 <= self.T
+        }
+
         for t in gameweeks:
             self.prob += (
                 pulp.lpSum([self.variables['x'][(p, t)] for p in players]) == TOTAL_SQUAD_SIZE,
                 f"Squad_Size_{t}",
             )
-            self.prob += (
-                pulp.lpSum([player_price[p] * self.variables['x'][(p, t)] for p in players]) <= self.budget,
-                f"Budget_{t}",
-            )
+            if t not in fh_internal_gws:
+                self.prob += (
+                    pulp.lpSum([player_price[p] * self.variables['x'][(p, t)] for p in players]) <= self.budget,
+                    f"Budget_{t}",
+                )
             for position, required_count in SQUAD_COMPOSITION.items():
                 position_players = [p for p in players if player_position[p] == position]
                 self.prob += (
@@ -582,12 +595,23 @@ class FPLSolver:
         logger.debug("Squad composition constraints added")
 
     def add_lineup_constraints(self) -> None:
-        """Add lineup selection constraints."""
+        """Add lineup selection constraints.
+
+        Free Hit GWs are skipped: the main solver ignores lineup/captain
+        selection because the FH sub-problem handles it independently.
+        All y/c variables are implicitly 0 on FH GWs (no points to gain).
+        """
         logger.debug("Adding lineup constraints")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
         player_position = dict(zip(self.players['element'], self.players['position']))
+
+        fh_internal_gws = {
+            gw - self.start_gw + 1
+            for gw in self.free_hit_gws
+            if 1 <= gw - self.start_gw + 1 <= self.T
+        }
 
         for t in gameweeks:
             for p in players:
@@ -595,6 +619,10 @@ class FPLSolver:
                     self.variables['y'][(p, t)] <= self.variables['x'][(p, t)],
                     f"Start_Owned_{p}_{t}",
                 )
+
+            if t in fh_internal_gws:
+                continue
+
             self.prob += (
                 pulp.lpSum([self.variables['y'][(p, t)] for p in players]) == TOTAL_LINEUP_SIZE,
                 f"Lineup_Size_{t}",
@@ -630,11 +658,17 @@ class FPLSolver:
         logger.debug("Advanced constraints added")
 
     def _add_forced_lineup_constraints(self) -> None:
-        """Add constraints to force specific players to start."""
+        """Add constraints to force specific players to start.
+
+        Free Hit GWs are skipped because lineup selection is handled
+        by the FH sub-problem independently.
+        """
         if not self.forced_lineup_players:
             return
 
         logger.debug("Adding forced lineup constraints")
+
+        fh_gw_set = set(self.free_hit_gws)
 
         for player_id, forced_gws in self.forced_lineup_players:
             player_name = "Unknown"
@@ -647,6 +681,9 @@ class FPLSolver:
                     continue
 
             for gw in forced_gws:
+                if gw in fh_gw_set:
+                    logger.debug("  Player %d (%s) forced lineup skipped for FH GW %d", player_id, player_name, gw)
+                    continue
                 internal_gw = gw - self.start_gw + 1
                 if 1 <= internal_gw <= self.T:
                     if (player_id, internal_gw) not in self.variables['y']:
@@ -688,17 +725,31 @@ class FPLSolver:
                     )
 
     def _add_bgw_constraints(self) -> None:
-        """Prevent starting/captaining players with no fixture (BGW)."""
+        """Prevent starting/captaining players with no fixture (BGW).
+
+        Free Hit GWs are skipped because lineup selection is handled by the
+        FH sub-problem; the main solver's y/c variables are unconstrained
+        (and have 0 expected points) on those GWs.
+        """
         if not hasattr(self, 'expected_points') or self.expected_points is None:
             logger.warning("Expected points not available - skipping BGW constraints")
             return
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
+
+        fh_internal_gws = {
+            gw - self.start_gw + 1
+            for gw in self.free_hit_gws
+            if 1 <= gw - self.start_gw + 1 <= self.T
+        }
+
         bgw_combinations = []
         bgw_by_gw = {}
 
         for t in gameweeks:
+            if t in fh_internal_gws:
+                continue
             actual_gw = self.start_gw + t - 1
             bgw_by_gw[actual_gw] = []
             for p in players:

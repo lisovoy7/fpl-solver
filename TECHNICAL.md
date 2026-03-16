@@ -352,7 +352,8 @@ Free Hit GWs are also determined by scenario enumeration. For a FH GW:
 1. All player points in the main solver are set to 0 for that GW.
 2. **Squad is frozen**: transfer-in and transfer-out variables are forced to 0 for all players, ensuring the real squad flows through the FH GW unchanged (matching FPL's revert-after-FH rule).
 3. Transfer banking is preserved across the FH GW (available transfers carry through).
-4. A **separate MILP** (`fpl/free_hit.py`) solves the optimal squad from scratch for that single GW, subject to budget and composition constraints. The FH points are added to the main solver's total afterwards.
+4. **Lineup, captain, BGW, budget, and forced-lineup constraints are relaxed** for the FH GW in the main solver. Because the FH sub-problem handles lineup selection independently, the main solver's lineup/captain variables are irrelevant. Budget is relaxed because the frozen squad may have a market value exceeding the selling-price-based budget (due to player appreciation) — this is expected and not a real constraint violation.
+5. A **separate MILP** (`fpl/free_hit.py`) solves the optimal squad from scratch for that single GW, subject to budget and composition constraints. The FH points are added to the main solver's total afterwards.
 
 ### Free Hit Sub-Problem
 
