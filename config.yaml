@@ -20,7 +20,7 @@ team_id: 4514531
 
 # Free transfers available right now. Must be set manually because the FPL API
 # does not reliably expose pending free transfers.
-free_transfers: 3
+free_transfers: 4
 
 # ---------- Auto-detected (override only if needed) ----------
 
@@ -93,21 +93,18 @@ transfer_topup:
 # Find team IDs in data/team_tiers.csv.
 
 fixture_overrides:
-  - home_team: 1       # Arsenal
-    away_team: 15      # Newcastle
+  - home_team: 6       # Brighton
+    away_team: 7       # Chelsea
     gameweek: 33
-  # - home_team: 6       # Brighton
-  #   away_team: 7       # Chelsea
-  #   gameweek: 33
-  # - home_team: 19      # West Ham
-  #   away_team: 9       # Everton
-  #   gameweek: 33
-  # - home_team: 3       # Burnley
-  #   away_team: 13      # Man City
-  #   gameweek: 33
+  - home_team: 3       # Burnley
+    away_team: 13      # Man City
+    gameweek: 33
+  - home_team: 4       # Bournemouth
+    away_team: 11      # Leeds
+    gameweek: 33
   - home_team: 13      # Man City
     away_team: 8       # Crystal Palace
-    gameweek: 33
+    gameweek: 36
 
 # ---------- Player overrides ----------
 # DISCLAIMER: The FPL API does NOT reflect transfers you've already made for the
