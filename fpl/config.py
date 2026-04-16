@@ -198,9 +198,9 @@ def get_player_overrides(config: dict[str, Any]) -> dict[str, Any]:
         return result
 
     return {
-        "non_playing": to_non_playing_tuples(config.get("non_playing", [])),
-        "forced_lineup": to_non_playing_tuples(config.get("forced_lineup", [])),
-        "points_multiplier": to_points_multiplier_tuples(config.get("points_multiplier", [])),
-        "excluded_players": [int(p) for p in config.get("excluded_players", [])],
-        "extra_players": [int(p) for p in config.get("extra_players", [])],
+        "non_playing": to_non_playing_tuples(config.get("non_playing") or []),
+        "forced_lineup": to_non_playing_tuples(config.get("forced_lineup") or []),
+        "points_multiplier": to_points_multiplier_tuples(config.get("points_multiplier") or []),
+        "excluded_players": [int(p) for p in (config.get("excluded_players") or [])],
+        "extra_players": [int(p) for p in (config.get("extra_players") or [])],
     }
