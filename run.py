@@ -370,11 +370,19 @@ def main() -> None:
 
     # 3. Fetch team data + selling prices
     last_played_gw = current_gw - 1
-    logger.info("Fetching team data for team %d, GW %d...", team_id, last_played_gw)
-    team_data = api.fetch_team_data(team_id, last_played_gw)
+    # If last played GW was a Free Hit, the picks on that GW are the temporary FH squad
+    # which reverts after the GW. Fetch the squad from the GW before the Free Hit instead.
+    free_hit_gws = detected_chips.get("free_hit_gws", [])
+    squad_gw = last_played_gw
+    if squad_gw in free_hit_gws and squad_gw > 1:
+        squad_gw = last_played_gw - 1
+        logger.info("Last played GW %d was a Free Hit — using GW %d squad instead",
+                    last_played_gw, squad_gw)
+    logger.info("Fetching team data for team %d, GW %d...", team_id, squad_gw)
+    team_data = api.fetch_team_data(team_id, squad_gw)
     current_squad = team_data["squad"]
 
-    selling_info, selling_summary = api.get_squad_selling_prices(team_id, last_played_gw)
+    selling_info, selling_summary = api.get_squad_selling_prices(team_id, squad_gw)
     total_budget = selling_summary["correct_budget"]
     initial_bank = selling_summary["bank"]
     initial_selling_prices = selling_summary["selling_prices"]

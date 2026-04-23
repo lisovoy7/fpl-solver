@@ -410,22 +410,27 @@ def detect_chips_used(team_id: int) -> Dict:
     (GW 1-19 and GW 20-38), so each can be used 0, 1, or 2 times total.
 
     Returns:
-        Dict with total counts for each chip type (int, 0-2).
+        Dict with total counts for each chip type (int, 0-2) plus
+        `free_hit_gws` (list of GWs where Free Hit was used).
     """
     history = _fetch_history_data(team_id)
     chips = history.get("chips", [])
-    result = {
+    result: Dict[str, Any] = {
         "wildcards_used": 0,
         "free_hits_used": 0,
         "bench_boost_used": 0,
         "triple_captain_used": 0,
+        "free_hit_gws": [],
     }
     for c in chips:
         name = c.get("name", "")
+        event = c.get("event")
         if name == "wildcard":
             result["wildcards_used"] += 1
         elif name == "freehit":
             result["free_hits_used"] += 1
+            if event is not None:
+                result["free_hit_gws"].append(int(event))
         elif name == "bboost":
             result["bench_boost_used"] += 1
         elif name == "3xc":
