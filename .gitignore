@@ -1,3 +1,4 @@
+.venv/
 output/
 __pycache__/
 *.pyc
@@ -11,3 +12,4 @@ build/
 .vscode/
 *.csv.bak
 config.local.yaml
+CLAUDE.md

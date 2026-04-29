@@ -470,6 +470,10 @@ def main() -> None:
     # 5. Build watchlist
     must_include = list(current_squad)
     must_include.extend(overrides.get("extra_players", []))
+    # Auto-promote forced_lineup players into the candidate pool so the
+    # solver can actually start them (otherwise the constraint is silently
+    # skipped if the player didn't pass the recent-minutes threshold).
+    must_include.extend(pid for pid, _ in overrides.get("forced_lineup", []))
     must_exclude = overrides.get("excluded_players", [])
     min_hist_games = solver_params.get("min_hist_games", 7)
     min_hist_window = solver_params.get("min_hist_window", 10)
