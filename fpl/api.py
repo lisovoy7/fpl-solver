@@ -227,6 +227,128 @@ def fetch_gameweek_data(bootstrap_data: Optional[Dict] = None) -> pd.DataFrame:
     return pd.DataFrame(all_rows)
 
 
+def _fetch_all_rows(supabase_client: Any, table: str, columns: str = "*", page_size: int = 1000) -> List[Dict]:
+    """Paginate through a Supabase table — PostgREST caps a single response at ~1000 rows."""
+    rows: List[Dict] = []
+    start = 0
+    while True:
+        resp = supabase_client.table(table).select(columns).range(start, start + page_size - 1).execute()
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    return rows
+
+
+def fetch_gameweek_data_from_supabase(
+    supabase_client: Any,
+    bootstrap_data: Optional[Dict] = None,
+    max_age_hours: float = 24.0,
+) -> Optional[pd.DataFrame]:
+    """
+    Read the same per-player-per-fixture history that fetch_gameweek_data()
+    fetches (~700-800 element-summary API calls), from Supabase instead —
+    fpl-lad's daily cron already syncs player_gw_history there.
+
+    Returns None (caller should fall back to fetch_gameweek_data()) if:
+      - no Supabase client was configured
+      - the table is empty
+      - the newest fetched_at is older than max_age_hours (stale/never synced)
+      - anything about the read fails
+
+    This is purely an optional accelerator — nothing about fpl-solver's normal
+    behaviour (CLI, or Cloud Run with no Supabase env vars set) depends on it.
+    """
+    if supabase_client is None:
+        return None
+
+    try:
+        freshness = (
+            supabase_client.table("player_gw_history")
+            .select("fetched_at")
+            .order("fetched_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not freshness.data:
+            return None
+
+        newest_raw = freshness.data[0]["fetched_at"]
+        newest = datetime.fromisoformat(newest_raw.replace("Z", "+00:00"))
+        age_hours = (datetime.now(timezone.utc) - newest).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            logger.info(
+                "Supabase gw_history is %.1f hours old (limit %.0f) — falling back to live fetch",
+                age_hours, max_age_hours,
+            )
+            return None
+
+        gw_history = _fetch_all_rows(supabase_client, "player_gw_history")
+        if not gw_history:
+            return None
+
+        fixtures = _fetch_all_rows(supabase_client, "fixtures", columns="id,team_h,team_a,kickoff_time")
+        fixtures_by_id = {f["id"]: f for f in fixtures}
+
+        data = bootstrap_data or fetch_bootstrap_data()
+        elements = {e["id"]: e for e in data.get("elements", [])}
+
+        rows: List[Dict[str, Any]] = []
+        for h in gw_history:
+            pid = h["player_id"]
+            player = elements.get(pid)
+            fixture = fixtures_by_id.get(h["fixture"])
+            if player is None or fixture is None:
+                continue
+
+            player_team = player.get("team")
+            was_home = fixture["team_h"] == player_team
+            opponent_team = fixture["team_a"] if was_home else fixture["team_h"]
+            name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
+            pos = POSITION_MAP.get(int(player.get("element_type", 1)), "UNKNOWN")
+
+            rows.append({
+                "name": name,
+                "position": pos,
+                "element": int(pid),
+                "assists": h.get("assists", 0),
+                "bonus": h.get("bonus", 0),
+                "clean_sheets": h.get("clean_sheets", 0),
+                "defensive_contribution": h.get("defensive_contribution", 0),
+                "expected_assists": h.get("expected_assists", 0),
+                "expected_goals": h.get("expected_goals", 0),
+                "expected_goals_conceded": h.get("expected_goals_conceded", 0),
+                "fixture": h.get("fixture", 0),
+                "goals_conceded": h.get("goals_conceded", 0),
+                "goals_scored": h.get("goals_scored", 0),
+                "kickoff_time": fixture.get("kickoff_time", ""),
+                "minutes": h.get("minutes", 0),
+                "opponent_team": opponent_team,
+                "own_goals": h.get("own_goals", 0),
+                "penalties_missed": h.get("penalties_missed", 0),
+                "penalties_saved": h.get("penalties_saved", 0),
+                "red_cards": h.get("red_cards", 0),
+                "round": h.get("round", 0),
+                "GW": h.get("round", 0),
+                "saves": h.get("saves", 0),
+                "starts": h.get("starts", 0),
+                "total_points": h.get("total_points", 0),
+                "transfers_in": h.get("transfers_in", 0),
+                "transfers_out": h.get("transfers_out", 0),
+                "value": h.get("value", 0),
+                "was_home": was_home,
+                "yellow_cards": h.get("yellow_cards", 0),
+            })
+
+        df = pd.DataFrame(rows)
+        logger.info("Loaded gw_data from Supabase: %d rows (%.1f hours old)", len(df), age_hours)
+        return df
+    except Exception:
+        logger.exception("Supabase gw_data read-through failed — falling back to live fetch")
+        return None
+
+
 def fetch_current_fixtures(bootstrap_data: Optional[Dict] = None) -> pd.DataFrame:
     """
     Fetch fixtures from the FPL API.

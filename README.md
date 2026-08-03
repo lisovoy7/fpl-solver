@@ -251,19 +251,9 @@ Several config parameters require numeric IDs. Here's exactly where to find each
 
 ### Player IDs (`player`, `excluded_players`, `extra_players`, `forced_lineup`, `non_playing`, `points_multiplier`)
 
-The simplest way: open `data/player_ids.csv` in this repo. It contains all ~820 active Premier League players with their ID, name, and position — ready to search.
+The simplest way: after running the solver once, open `output/gw_data.csv` — it contains every active Premier League player, freshly fetched from the FPL API. Look for the `element` column (that's the player ID) alongside `name` and `position`. Ctrl+F the player's name and use the `element` value.
 
-```
-player_id, player_name,          position
-454,        Mohamed Salah,        MID
-328,        Erling Haaland,       FWD
-235,        Cole Palmer,          MID
-...
-```
-
-Just Ctrl+F the player's name and use the `player_id` value.
-
-> This file is a snapshot from the current season. If you need a freshly updated list after running the solver, the file `output/gw_data.csv` (generated automatically on first run) also contains every player — look for the `element` column (that's the player ID) alongside `name` and `position`.
+(There used to be a static `data/player_ids.csv` snapshot for this — it was never read by any code and drifted out of date as players joined/left, so it's been removed. `output/gw_data.csv` is always current.)
 
 ### Team IDs (`fixture_overrides` — `home_team` / `away_team`)
 
