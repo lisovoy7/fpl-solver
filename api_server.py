@@ -478,6 +478,12 @@ async def generate_predictions_cron(secret: str = Query(...)):
     season = api.detect_current_season(bootstrap)
 
     gw_data = _get_gw_data(bootstrap)
+    if gw_data.empty or "minutes" not in gw_data.columns:
+        # No fixture has been played yet this season (e.g. pre-season, before GW1's
+        # deadline) — generate_predictions() needs real minutes-played history to
+        # build player averages from. Nothing to do yet; try again on the next run.
+        return {"ok": True, "rows_written": 0, "note": "no gameweek data yet this season"}
+
     fixtures = api.fetch_current_fixtures(bootstrap)
     multipliers = pd.read_csv(DATA_DIR / "multipliers.csv")
     team_tiers = pd.read_csv(DATA_DIR / "team_tiers.csv")
