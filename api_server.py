@@ -279,8 +279,12 @@ async def get_squad(team_id: int):
         current_gw = api.detect_current_gw(bootstrap)
 
         entry = api.fetch_entry_summary(team_id)
-        started_event = entry.get("started_event") if entry else None
-        last_gw = _last_known_gw(started_event, bootstrap)
+        if entry is None:
+            # FPL's entry endpoint 404s (or is unreachable) — don't mistake a bad
+            # team ID for a team whose picks simply aren't public yet.
+            raise HTTPException(status_code=404, detail=f"No FPL team found with ID {team_id}")
+
+        last_gw = _last_known_gw(entry.get("started_event"), bootstrap)
 
         if last_gw is None:
             return {
@@ -313,6 +317,8 @@ async def get_squad(team_id: int):
                 "triple_captain_used": chips_used.get("triple_captain_used", 0),
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error fetching squad for team %d", team_id)
         raise HTTPException(status_code=400, detail=str(e))
