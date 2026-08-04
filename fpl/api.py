@@ -26,6 +26,7 @@ _BOOTSTRAP_CACHE: Optional[Dict] = None
 BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
 ELEMENT_SUMMARY_URL = "https://fantasy.premierleague.com/api/element-summary/{id}/"
 FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
+ENTRY_URL = "https://fantasy.premierleague.com/api/entry/{team_id}/"
 ENTRY_PICKS_URL = "https://fantasy.premierleague.com/api/entry/{team_id}/event/{gw}/picks/"
 ENTRY_TRANSFERS_URL = "https://fantasy.premierleague.com/api/entry/{team_id}/transfers/"
 ENTRY_HISTORY_URL = "https://fantasy.premierleague.com/api/entry/{team_id}/history/"
@@ -376,6 +377,21 @@ def fetch_current_fixtures(bootstrap_data: Optional[Dict] = None) -> pd.DataFram
             "finished": f.get("finished"),
         })
     return pd.DataFrame(rows, columns=cols)
+
+
+def fetch_entry_summary(team_id: int) -> Optional[Dict]:
+    """
+    Fetch a manager's entry summary — name, region, started_event, current_event, etc.
+
+    `started_event` is the GW the manager's team was created for (set as soon as
+    they pick a squad, even before that GW's deadline passes) — used to tell
+    whether a team's picks are old enough to be public yet, including for
+    managers who joined mid-season rather than at GW1.
+
+    Returns:
+        Entry summary dict, or None if the request fails.
+    """
+    return make_api_request(ENTRY_URL.format(team_id=team_id))
 
 
 def fetch_team_data(team_id: int, gw: int) -> Dict:

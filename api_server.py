@@ -238,13 +238,56 @@ async def health():
     return {"status": "ok", "service": "fpl-solver"}
 
 
+def _last_known_gw(started_event: Optional[int], bootstrap_data: dict) -> Optional[int]:
+    """
+    Latest GW that's both (a) past its deadline and (b) on or after the team's
+    `started_event` — i.e. the most recent GW this team could actually have
+    public picks for.
+
+    Handles pre-GW1 (started_event == 1, but GW1's deadline hasn't passed) and
+    managers who joined mid-season (started_event == some later GW whose
+    deadline hasn't passed yet) the same way: both return None.
+
+    Returns:
+        The GW number, or None if this team has no public picks yet.
+    """
+    now = datetime.now(timezone.utc)
+    known: Optional[int] = None
+    for event in bootstrap_data.get("events", []):
+        eid = int(event.get("id", 0))
+        deadline_str = event.get("deadline_time")
+        if not deadline_str:
+            continue
+        try:
+            deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if deadline > now:
+            continue
+        if started_event is not None and eid < started_event:
+            continue
+        if known is None or eid > known:
+            known = eid
+    return known
+
+
 @app.get("/api/squad")
 async def get_squad(team_id: int):
     """Fetch a user's current squad from the FPL API."""
     try:
         bootstrap = api.fetch_bootstrap_data()
         current_gw = api.detect_current_gw(bootstrap)
-        last_gw = current_gw - 1 if current_gw > 1 else 1
+
+        entry = api.fetch_entry_summary(team_id)
+        started_event = entry.get("started_event") if entry else None
+        last_gw = _last_known_gw(started_event, bootstrap)
+
+        if last_gw is None:
+            return {
+                "team_id": team_id,
+                "squad": None,
+                "reason": "picks_not_public_yet",
+            }
 
         team_data = api.fetch_team_data(team_id, last_gw)
         selling_info, selling_summary = api.get_squad_selling_prices(team_id, last_gw)
