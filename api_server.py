@@ -514,12 +514,52 @@ async def optimize_async(
 # solver can read them back instead of recomputing per request.
 # ---------------------------------------------------------------------------
 
+def _predictions_sync_enabled(default: bool = True) -> bool:
+    """
+    Read app_config.predictions_sync_enabled.
+
+    Defaults to enabled when the row is absent or unreadable, so a missing key
+    never silently stops predictions from being generated — the flag has to be
+    set to false deliberately to take effect.
+    """
+    try:
+        resp = (
+            _supabase.table("app_config")
+            .select("value")
+            .eq("key", "predictions_sync_enabled")
+            .maybe_single()
+            .execute()
+        )
+    except Exception:
+        logger.exception("Could not read predictions_sync_enabled — assuming %s", default)
+        return default
+
+    if not resp or not getattr(resp, "data", None):
+        return default
+
+    value = resp.data.get("value")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no")
+    return default
+
+
 @app.post("/api/cron/generate-predictions")
 async def generate_predictions_cron(secret: str = Query(...)):
     if not _CRON_SECRET or secret != _CRON_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if _supabase is None:
         raise HTTPException(status_code=503, detail="Supabase not configured on this service")
+
+    # Kill switch. Early in the season player_predictions is populated by hand
+    # with proxy predictions (see fpl-lad's proxy-points-predictions skill) and
+    # must stay static — regenerating would overwrite it with the empty result
+    # the real pipeline produces before any fixtures have been played. Flip
+    # app_config.predictions_sync_enabled back to true to resume normal syncing.
+    if not _predictions_sync_enabled():
+        logger.info("generate-predictions cron: skipped (predictions_sync_enabled = false)")
+        return {"ok": True, "rows_written": 0, "note": "predictions sync disabled via app_config"}
 
     start_time = time.time()
 
