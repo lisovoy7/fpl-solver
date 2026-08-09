@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent / "data"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
+# Every FPL manager starts the season with exactly 100.0M, in tenths.
+DRAFT_BUDGET = 1000
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
@@ -56,6 +59,10 @@ def parse_args() -> argparse.Namespace:
                         help="Force bench boost on a specific GW (CLI override)")
     parser.add_argument("--time-limit", type=int, default=None,
                         help="Override solver time limit per scenario (seconds)")
+    parser.add_argument("--draft", action="store_true",
+                        help="Pre-season draft mode: build a squad from scratch. "
+                             "Auto-enabled before the GW1 deadline. Candidate pool "
+                             "is restricted to config extra_players; chips disabled.")
     return parser.parse_args()
 
 
@@ -89,6 +96,7 @@ def _build_strategy_text(
     non_playing: List[Tuple[int, List[int]]],
     free_hit_gws: List[int], fh_benefits: Dict,
     initial_bank: int, initial_selling_prices: Dict[int, int],
+    draft_mode: bool = False,
 ) -> str:
     """
     Build the full visual strategy text.
@@ -154,7 +162,10 @@ def _build_strategy_text(
                     gw_total_pts += pts
 
         # GW header
+        is_draft_gw = draft_mode and gw == start_gw
         chip_badges = []
+        if is_draft_gw:
+            chip_badges.append("[INITIAL SQUAD]")
         if is_wc:
             chip_badges.append("[WILDCARD]")
         if is_fh:
@@ -189,7 +200,11 @@ def _build_strategy_text(
                 selling_prices[pid] = buy_price
 
         # Transfers
-        if is_fh:
+        if is_draft_gw:
+            squad_cost = sum(player_market_prices.get(pid, 0) for pid in squad_ids)
+            lines.append(f"  DRAFT: 15 players picked from scratch "
+                         f"({squad_cost / 10:.1f}M spent, {cumulative_bank / 10:.1f}M left)")
+        elif is_fh:
             fh_data = fh_benefits.get(gw, {})
             fh_pts = fh_data.get("total_points", 0)
             lines.append(f"  FREE HIT: Optimal squad selected from entire pool ({fh_pts:.1f} pts)")
@@ -292,7 +307,8 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
                      start_gw: int, total_points: float, scenario_name: str,
                      non_playing: List[Tuple[int, List[int]]],
                      free_hit_gws: List[int], fh_benefits: Dict,
-                     initial_bank: int, initial_selling_prices: Dict[int, int]) -> str:
+                     initial_bank: int, initial_selling_prices: Dict[int, int],
+                     draft_mode: bool = False) -> str:
     """
     Display the optimal strategy to console and return the text.
 
@@ -302,6 +318,7 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
     text = _build_strategy_text(
         solution, solver, players, start_gw, total_points, scenario_name,
         non_playing, free_hit_gws, fh_benefits, initial_bank, initial_selling_prices,
+        draft_mode=draft_mode,
     )
     print(text)
     return text
@@ -378,17 +395,31 @@ def main() -> None:
         squad_gw = last_played_gw - 1
         logger.info("Last played GW %d was a Free Hit — using GW %d squad instead",
                     last_played_gw, squad_gw)
-    logger.info("Fetching team data for team %d, GW %d...", team_id, squad_gw)
-    team_data = api.fetch_team_data(team_id, squad_gw)
-    current_squad = team_data["squad"]
 
-    selling_info, selling_summary = api.get_squad_selling_prices(team_id, squad_gw)
-    total_budget = selling_summary["correct_budget"]
-    initial_bank = selling_summary["bank"]
-    initial_selling_prices = selling_summary["selling_prices"]
+    # Pre-season there is no previous gameweek to read a squad from, so the
+    # picks endpoint 404s. Build from scratch instead.
+    draft_mode = args.draft or squad_gw < 1
 
-    logger.info("Budget: %.1fM (bank: %.1fM), squad: %d players",
-                total_budget / 10, initial_bank / 10, len(current_squad))
+    if draft_mode:
+        current_squad = []
+        total_budget = int(solver_params.get("draft_budget", DRAFT_BUDGET))
+        initial_bank = total_budget
+        initial_selling_prices = {}
+        logger.info("DRAFT MODE — no existing squad (GW %d has not been played). "
+                    "Building 15 from scratch on a %.1fM budget.",
+                    max(squad_gw, 0), total_budget / 10)
+    else:
+        logger.info("Fetching team data for team %d, GW %d...", team_id, squad_gw)
+        team_data = api.fetch_team_data(team_id, squad_gw)
+        current_squad = team_data["squad"]
+
+        _, selling_summary = api.get_squad_selling_prices(team_id, squad_gw)
+        total_budget = selling_summary["correct_budget"]
+        initial_bank = selling_summary["bank"]
+        initial_selling_prices = selling_summary["selling_prices"]
+
+        logger.info("Budget: %.1fM (bank: %.1fM), squad: %d players",
+                    total_budget / 10, initial_bank / 10, len(current_squad))
 
     # 4. Fetch GW data + fixtures
     multipliers, team_tiers = load_bundled_data()
@@ -398,7 +429,9 @@ def main() -> None:
     logger.info("Fetched %d fixtures", len(fixtures))
 
     # Apply fixture overrides (DGW/BGW schedule changes)
-    fixture_overrides = config.get("fixture_overrides", [])
+    # `or []` because an empty `fixture_overrides:` key in YAML parses to None,
+    # which .get()'s default never covers.
+    fixture_overrides = config.get("fixture_overrides") or []
     for override in fixture_overrides:
         home = override.get("home_team")
         away = override.get("away_team")
@@ -498,13 +531,41 @@ def main() -> None:
         # WARNING: this leaves the candidate pool unfiltered, and the proxy model
         # assumes every player starts, so cheap non-playing players are ranked
         # like nailed starters. Sanity-check the chosen squad in these GWs.
-        logger.warning("Proxy predictions in use — min_hist_pct filter disabled "
-                       "(candidate pool is unfiltered; verify the squad manually)")
+        # Draft mode doesn't have this problem: it replaces the pool outright
+        # with extra_players below.
+        if not draft_mode:
+            logger.warning("Proxy predictions in use — min_hist_pct filter disabled "
+                           "(candidate pool is unfiltered; verify the squad manually)")
         min_hist_pct = 0.0
 
-    watchlist = create_watchlist(predictions, gw_data, min_hist_pct=min_hist_pct,
-                                max_hist_window=max_hist_window,
-                                must_include=must_include, must_exclude=must_exclude)
+    if draft_mode:
+        # The usual filter keys off 60+ minute appearances, and pre-season nobody
+        # has any — so it would either drop everyone or (with the threshold at 0)
+        # wave through all 573 players, including third-choice keepers the proxy
+        # model happily rates as nailed starters. extra_players is the only real
+        # signal available about who is expected to start, so it *becomes* the
+        # candidate pool rather than merely topping it up.
+        # forced_lineup still gets promoted in: asking for a player to start and
+        # then dropping them from the pool would silently ignore the instruction.
+        draft_candidates = list(overrides.get("extra_players", []))
+        draft_candidates.extend(pid for pid, _ in overrides.get("forced_lineup", []))
+        draft_pool = list(dict.fromkeys(
+            pid for pid in draft_candidates if pid not in must_exclude
+        ))
+        if len(draft_pool) < 15:
+            raise SystemExit(
+                f"Draft mode needs at least 15 candidates in extra_players, got "
+                f"{len(draft_pool)}. Populate extra_players in your config with the "
+                f"expected GW{current_gw} starters."
+            )
+        watchlist = draft_pool
+        logger.info("DRAFT MODE — candidate pool restricted to %d extra_players",
+                    len(watchlist))
+    else:
+        watchlist = create_watchlist(predictions, gw_data, min_hist_pct=min_hist_pct,
+                                     max_hist_window=max_hist_window,
+                                     must_include=must_include,
+                                     must_exclude=must_exclude)
 
     # 6. Chip scenarios
     wildcards_used = chips_cfg.get("wildcards_used", 0)
@@ -525,7 +586,9 @@ def main() -> None:
     if args.force_bench_boost_gw is not None:
         force_bench_boost_gw = args.force_bench_boost_gw
 
-    if args.no_chips:
+    if args.no_chips or draft_mode:
+        # Draft mode plans the opening squad only — chips are never played on
+        # GW1, and a wildcard scenario would collide with the free build.
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [],
                            "bench_boost_gw": -1, "triple_captain_gw": -1,
                            "force_wildcard_gw": None}]
@@ -594,6 +657,7 @@ def main() -> None:
             triple_captain_gw=scenario["triple_captain_gw"],
             free_hit_gws=scenario["free_hit_gws"],
             force_wildcard_gw=scenario.get("force_wildcard_gw"),
+            draft_mode=draft_mode,
         )
 
         solver.load_predictions(predictions)
@@ -603,11 +667,20 @@ def main() -> None:
             continue
 
         solver.load_player_data(gw_data, predictions, player_subset=watchlist)
-        solver.set_initial_squad(current_squad, available_transfers=free_transfers)
-        solver.set_chip_state(
-            wildcard_first_half=min(wildcards_used, 1),
-            wildcard_second_half=max(0, wildcards_used - 1),
-        )
+        if draft_mode:
+            # A[1]=0 so the GW1 banking constraint yields A[2]=1 — the single
+            # free transfer FPL grants for GW2. The free build itself is
+            # accounted for separately (see Draft_No_Transfers_GW1).
+            solver.set_initial_squad([], available_transfers=0)
+            # Mark both wildcards spent so the solver can't reach for one:
+            # draft mode is transfers-only by design.
+            solver.set_chip_state(wildcard_first_half=1, wildcard_second_half=1)
+        else:
+            solver.set_initial_squad(current_squad, available_transfers=free_transfers)
+            solver.set_chip_state(
+                wildcard_first_half=min(wildcards_used, 1),
+                wildcard_second_half=max(0, wildcards_used - 1),
+            )
 
         solver.build_model()
         success = solver.solve(time_limit=time_limit)
@@ -665,6 +738,7 @@ def main() -> None:
         overrides.get("non_playing", []),
         best_result["free_hit_gws"], fh_benefits,
         initial_bank, initial_selling_prices,
+        draft_mode=draft_mode,
     )
 
     save_strategy(best_result["solution"], best_result["scenario_name"],

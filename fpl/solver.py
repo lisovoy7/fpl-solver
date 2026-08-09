@@ -62,6 +62,7 @@ class FPLSolver:
         bench_boost_gw: int = -1,
         triple_captain_gw: int = -1,
         force_wildcard_gw: Optional[int] = None,
+        draft_mode: bool = False,
     ):
         """
         Initialize the FPL solver.
@@ -83,6 +84,9 @@ class FPLSolver:
             bench_boost_gw: Gameweek for Bench Boost chip (-1 = disabled).
             triple_captain_gw: Gameweek for Triple Captain chip (-1 = disabled).
             force_wildcard_gw: Force wildcard on this GW (None = let solver decide).
+            draft_mode: Pre-season build-from-nothing mode. The initial squad is
+                empty and the first GW picks all 15 players free of charge, as
+                happens before the GW1 deadline when no team exists yet.
         """
         self.T = planning_horizon
         self.budget = budget
@@ -100,6 +104,7 @@ class FPLSolver:
         self.bench_boost_gw = bench_boost_gw
         self.triple_captain_gw = triple_captain_gw
         self.force_wildcard_gw = force_wildcard_gw
+        self.draft_mode = draft_mode
 
         self.players = None
         self.predictions = None
@@ -254,10 +259,14 @@ class FPLSolver:
         Set the initial squad composition.
 
         Args:
-            squad_player_ids: List of 15 player IDs in current squad.
+            squad_player_ids: List of 15 player IDs in current squad. Must be
+                empty in draft mode — pre-season there is no squad to carry in.
             available_transfers: Number of free transfers available at start.
         """
-        if len(squad_player_ids) != TOTAL_SQUAD_SIZE:
+        if self.draft_mode:
+            if squad_player_ids:
+                raise ValueError("Draft mode expects an empty initial squad")
+        elif len(squad_player_ids) != TOTAL_SQUAD_SIZE:
             raise ValueError(f"Initial squad must have exactly {TOTAL_SQUAD_SIZE} players")
 
         self.initial_squad = squad_player_ids
@@ -486,6 +495,18 @@ class FPLSolver:
                     self.prob += (self.variables['r'][(p, t)] == 0, f"FH_No_Out_{p}_{t}")
 
         for t in gameweeks:
+            # Draft mode: GW1 buys all 15 players from an empty squad. Counting
+            # those as transfers is doubly wrong — the in/out counts can't match
+            # (nothing is sold), and the -4 penalties would charge -60 pts for
+            # what FPL treats as a free build. Decouple u[1] from the flow so
+            # the squad-size constraint alone drives selection, and leave the
+            # penalty variables to fall out at 0 via their own lower bounds.
+            if self.draft_mode and t == 1:
+                self.prob += (self.variables['u'][1] == 0, "Draft_No_Transfers_GW1")
+                for p in players:
+                    self.prob += (self.variables['r'][(p, 1)] == 0, f"Draft_No_Sell_{p}")
+                continue
+
             self.prob += (
                 self.variables['u'][t] == pulp.lpSum([self.variables['s'][(p, t)] for p in players]),
                 f"Transfer_Count_In_{t}",
@@ -701,11 +722,26 @@ class FPLSolver:
                     )
 
     def _add_non_playing_player_constraints(self) -> None:
-        """Log non-playing overrides (handled in objective)."""
+        """Bar non-playing players from the lineup in their flagged gameweeks.
+
+        The objective already zeroes their points, but that only makes starting
+        them pointless, not impossible — with a thin candidate pool the solver
+        can still be forced to field one to satisfy the lineup constraints.
+        These constraints keep them out of the XI outright.
+
+        Squad membership (``x``) is deliberately left free: a player suspended
+        for one gameweek is still worth owning for the rest of the horizon.
+        """
         if not self.non_playing_players:
             return
 
-        logger.debug("Adding non-playing player constraints (0 points override)")
+        logger.debug("Adding non-playing player constraints (barred from lineup)")
+        pool = set(self.players['element'].tolist()) if self.players is not None else set()
+        constraints_added = 0
+
+        # forced_lineup pins y to 1 for the same variable, so overlapping config
+        # would make the model infeasible with nothing pointing at the cause.
+        forced = {(pid, gw) for pid, gws in self.forced_lineup_players for gw in gws}
 
         for player_id, non_playing_gws in self.non_playing_players:
             player_name = "Unknown"
@@ -716,13 +752,34 @@ class FPLSolver:
 
             for gw in non_playing_gws:
                 internal_gw = gw - self.start_gw + 1
-                if 1 <= internal_gw <= self.T:
-                    logger.debug("  Player %d (%s) will get 0 points in GW %d", player_id, player_name, gw)
-                else:
+                if not 1 <= internal_gw <= self.T:
                     logger.warning(
                         "  Player %d non-playing override for GW %d outside planning horizon",
                         player_id, gw,
                     )
+                    continue
+                if player_id not in pool:
+                    continue
+                if (player_id, gw) in forced:
+                    logger.warning(
+                        "  Player %d (%s) is both forced_lineup and non_playing for GW %d "
+                        "— honouring forced_lineup, leaving them startable",
+                        player_id, player_name, gw,
+                    )
+                    continue
+
+                self.prob += (
+                    self.variables['y'][(player_id, internal_gw)] == 0,
+                    f"NonPlaying_No_Start_{player_id}_GW{gw}",
+                )
+                self.prob += (
+                    self.variables['c'][(player_id, internal_gw)] == 0,
+                    f"NonPlaying_No_Captain_{player_id}_GW{gw}",
+                )
+                constraints_added += 2
+                logger.debug("  Player %d (%s) barred from GW %d lineup", player_id, player_name, gw)
+
+        logger.debug("Added %d non-playing constraints", constraints_added)
 
     def _add_bgw_constraints(self) -> None:
         """Prevent starting/captaining players with no fixture (BGW).
