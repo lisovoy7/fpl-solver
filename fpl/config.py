@@ -24,6 +24,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Default values for optional config sections
 _DEFAULT_SOLVER = {
     "planning_horizon": "rest_of_season",
+    # While this GW's deadline hasn't passed, predictions come from
+    # data/proxy_predictions.csv rather than this season's (nonexistent) history.
+    # None/0 disables the fallback. See fpl/proxy_predict.py.
+    "points_pred_gw_threshold": 4,
     "min_hist_games": 7,
     "sub_probability": 0.10,
     "first_gw_transfer_penalty": -1,

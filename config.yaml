@@ -34,6 +34,16 @@ solver:
   # "rest_of_season" or an integer (e.g. 5 for 5-GW horizon)
   planning_horizon: rest_of_season
 
+  # Early-season fallback. While this gameweek's deadline has NOT passed, use the
+  # pre-computed proxy predictions in data/proxy_predictions.csv instead of
+  # generating predictions from this season's history — which doesn't exist yet
+  # (generate_predictions needs 60+ minute appearances, so it yields nothing in
+  # GW1). Once the deadline passes, predictions are generated normally.
+  # Set to null/0 to always use the normal pipeline.
+  # NOTE: while active, the min_hist_games filter is disabled (nobody has played
+  # yet) and the proxy model assumes every player starts — check the squad it picks.
+  points_pred_gw_threshold: 4
+
   # Minimum 60+ minute games a player must have to enter the candidate pool.
   # Lower = more players (less reliable). Higher = fewer players (more reliable).
   min_hist_games: 4

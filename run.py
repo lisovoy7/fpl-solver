@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from fpl import api, config as cfg
+from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import generate_chip_scenarios, calculate_free_hit_benefits_for_horizon
@@ -448,20 +448,34 @@ def main() -> None:
         logger.info("Loading cached gw_data from %s (%.1f hours old)", gw_data_path, age_hours)
         return pd.read_csv(gw_data_path)
 
-    # gw_data is fixture-independent (player history), so always try cache first
-    gw_data = _load_cached_gw_data()
-    if gw_data is None:
-        logger.info("Fetching gameweek data (this takes a few minutes)...")
-        gw_data = api.fetch_gameweek_data(bootstrap)
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        gw_data.to_csv(gw_data_path, index=False)
-        logger.info("Cached gw_data to %s (%d rows)", gw_data_path, len(gw_data))
-    else:
-        logger.info("GW data: %d records (from cache)", len(gw_data))
+    # Early in the season there aren't enough 60+ minute appearances for
+    # generate_predictions() to build player averages from, so fall back to the
+    # pre-computed proxy predictions until GW `points_pred_gw_threshold`'s
+    # deadline passes.
+    use_proxy = proxy_predict.should_use_proxy(
+        bootstrap, solver_params.get("points_pred_gw_threshold"), DATA_DIR
+    )
 
-    logger.info("Generating predictions...")
-    predictions = generate_predictions(gw_data, fixtures, multipliers,
-                                       current_season_tiers, season)
+    if use_proxy:
+        # Skip the (slow) gameweek-data fetch entirely — there is no history to
+        # fetch yet. Costs and player metadata come from bootstrap instead.
+        gw_data = proxy_predict.synthesize_gw_data(bootstrap)
+        predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
+    else:
+        # gw_data is fixture-independent (player history), so always try cache first
+        gw_data = _load_cached_gw_data()
+        if gw_data is None:
+            logger.info("Fetching gameweek data (this takes a few minutes)...")
+            gw_data = api.fetch_gameweek_data(bootstrap)
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            gw_data.to_csv(gw_data_path, index=False)
+            logger.info("Cached gw_data to %s (%d rows)", gw_data_path, len(gw_data))
+        else:
+            logger.info("GW data: %d records (from cache)", len(gw_data))
+
+        logger.info("Generating predictions...")
+        predictions = generate_predictions(gw_data, fixtures, multipliers,
+                                           current_season_tiers, season)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     predictions.to_csv(predictions_path, index=False)
@@ -477,6 +491,16 @@ def main() -> None:
     must_exclude = overrides.get("excluded_players", [])
     min_hist_games = solver_params.get("min_hist_games", 7)
     min_hist_window = solver_params.get("min_hist_window", 10)
+
+    if use_proxy:
+        # The appearance-count filter is meaningless against synthesized gw_data
+        # — nobody has played yet, so every player would be filtered out.
+        # WARNING: this leaves the candidate pool unfiltered, and the proxy model
+        # assumes every player starts, so cheap non-playing players are ranked
+        # like nailed starters. Sanity-check the chosen squad in these GWs.
+        logger.warning("Proxy predictions in use — min_hist_games filter disabled "
+                       "(candidate pool is unfiltered; verify the squad manually)")
+        min_hist_games = 0
 
     watchlist = create_watchlist(predictions, gw_data, min_hist_games=min_hist_games,
                                 min_hist_window=min_hist_window,
