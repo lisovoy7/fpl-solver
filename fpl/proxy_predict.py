@@ -146,7 +146,7 @@ def synthesize_gw_data(bootstrap: dict, as_of_gw: int = 1) -> pd.DataFrame:
     `minutes` is set to 90 so nothing is filtered out by minutes-based checks:
     with no appearances on record there is no basis to rank availability, and
     the proxy model already assumes every player features. Callers should pair
-    this with min_hist_games=0 — see run.py.
+    this with min_hist_pct=0.0 — see run.py.
     """
     position_by_type = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
