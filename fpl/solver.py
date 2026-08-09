@@ -63,6 +63,7 @@ class FPLSolver:
         triple_captain_gw: int = -1,
         force_wildcard_gw: Optional[int] = None,
         draft_mode: bool = False,
+        no_transfers: bool = False,
     ):
         """
         Initialize the FPL solver.
@@ -87,6 +88,10 @@ class FPLSolver:
             draft_mode: Pre-season build-from-nothing mode. The initial squad is
                 empty and the first GW picks all 15 players free of charge, as
                 happens before the GW1 deadline when no team exists yet.
+            no_transfers: Forbid all transfers, so the squad is frozen for the
+                whole horizon and only lineup and captaincy are optimised. In
+                draft mode the initial build is exempt — that is squad
+                selection, not a transfer.
         """
         self.T = planning_horizon
         self.budget = budget
@@ -105,6 +110,7 @@ class FPLSolver:
         self.triple_captain_gw = triple_captain_gw
         self.force_wildcard_gw = force_wildcard_gw
         self.draft_mode = draft_mode
+        self.no_transfers = no_transfers
 
         self.players = None
         self.predictions = None
@@ -515,6 +521,11 @@ class FPLSolver:
                 self.variables['u'][t] == pulp.lpSum([self.variables['r'][(p, t)] for p in players]),
                 f"Transfer_Count_Out_{t}",
             )
+
+            # u is pinned to both sums above, so zeroing it forces every s and r
+            # to 0 as well — the squad carries through untouched.
+            if self.no_transfers:
+                self.prob += (self.variables['u'][t] == 0, f"No_Transfers_GW{t}")
 
         logger.debug("Squad flow constraints added")
 

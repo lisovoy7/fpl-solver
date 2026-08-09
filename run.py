@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
                         help="Pre-season draft mode: build a squad from scratch. "
                              "Auto-enabled before the GW1 deadline. Candidate pool "
                              "is restricted to config extra_players; chips disabled.")
+    parser.add_argument("--no-transfers", action="store_true",
+                        help="Forbid all transfers — freeze the squad for the whole "
+                             "horizon and optimize only lineup and captaincy. In "
+                             "draft mode the initial 15 are still picked freely.")
     return parser.parse_args()
 
 
@@ -96,7 +100,7 @@ def _build_strategy_text(
     non_playing: List[Tuple[int, List[int]]],
     free_hit_gws: List[int], fh_benefits: Dict,
     initial_bank: int, initial_selling_prices: Dict[int, int],
-    draft_mode: bool = False,
+    draft_mode: bool = False, no_transfers: bool = False,
 ) -> str:
     """
     Build the full visual strategy text.
@@ -184,8 +188,12 @@ def _build_strategy_text(
         lines.append(gw_header)
         lines.append("-" * W)
 
-        available_ft = int(transfers.get("available_transfers", 0))
-        lines.append(f"  Free Transfers: {available_ft}")
+        # With transfers forbidden the free-transfer count is a free variable in
+        # the MILP — nothing in the objective pins it — so its value is arbitrary
+        # and printing it would just be misleading.
+        if not no_transfers:
+            available_ft = int(transfers.get("available_transfers", 0))
+            lines.append(f"  Free Transfers: {available_ft}")
 
         # Track bank
         if transfers["out"]:
@@ -308,7 +316,7 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
                      non_playing: List[Tuple[int, List[int]]],
                      free_hit_gws: List[int], fh_benefits: Dict,
                      initial_bank: int, initial_selling_prices: Dict[int, int],
-                     draft_mode: bool = False) -> str:
+                     draft_mode: bool = False, no_transfers: bool = False) -> str:
     """
     Display the optimal strategy to console and return the text.
 
@@ -318,7 +326,7 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
     text = _build_strategy_text(
         solution, solver, players, start_gw, total_points, scenario_name,
         non_playing, free_hit_gws, fh_benefits, initial_bank, initial_selling_prices,
-        draft_mode=draft_mode,
+        draft_mode=draft_mode, no_transfers=no_transfers,
     )
     print(text)
     return text
@@ -608,6 +616,10 @@ def main() -> None:
             force_wildcard_gw=force_wildcard_gw,
         )
 
+    if args.no_transfers:
+        logger.info("NO-TRANSFERS MODE — squad frozen for GW %d-%d, optimizing "
+                    "lineup and captaincy only", current_gw, current_gw + horizon - 1)
+
     max_scenarios = solver_params.get("max_scenarios", 100)
     if len(chip_scenarios) > max_scenarios:
         logger.warning("Limiting scenarios from %d to %d", len(chip_scenarios), max_scenarios)
@@ -658,6 +670,7 @@ def main() -> None:
             free_hit_gws=scenario["free_hit_gws"],
             force_wildcard_gw=scenario.get("force_wildcard_gw"),
             draft_mode=draft_mode,
+            no_transfers=args.no_transfers,
         )
 
         solver.load_predictions(predictions)
@@ -738,7 +751,7 @@ def main() -> None:
         overrides.get("non_playing", []),
         best_result["free_hit_gws"], fh_benefits,
         initial_bank, initial_selling_prices,
-        draft_mode=draft_mode,
+        draft_mode=draft_mode, no_transfers=args.no_transfers,
     )
 
     save_strategy(best_result["solution"], best_result["scenario_name"],
