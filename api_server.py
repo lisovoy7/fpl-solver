@@ -402,7 +402,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     must_include = list(current_squad)
     watchlist = create_watchlist(
         predictions, gw_data,
-        min_hist_games=4, min_hist_window=6,
+        min_hist_pct=0.6, max_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
     )
 

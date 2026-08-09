@@ -24,7 +24,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Default values for optional config sections
 _DEFAULT_SOLVER = {
     "planning_horizon": "rest_of_season",
-    "min_hist_games": 7,
+    "min_hist_pct": 0.6,
+    "max_hist_window": 6,
     "sub_probability": 0.10,
     "first_gw_transfer_penalty": -1,
     "time_limit_per_scenario": 15,

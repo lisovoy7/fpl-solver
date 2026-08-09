@@ -475,11 +475,11 @@ def main() -> None:
     # skipped if the player didn't pass the recent-minutes threshold).
     must_include.extend(pid for pid, _ in overrides.get("forced_lineup", []))
     must_exclude = overrides.get("excluded_players", [])
-    min_hist_games = solver_params.get("min_hist_games", 7)
-    min_hist_window = solver_params.get("min_hist_window", 10)
+    min_hist_pct = solver_params.get("min_hist_pct", 0.6)
+    max_hist_window = solver_params.get("max_hist_window", 6)
 
-    watchlist = create_watchlist(predictions, gw_data, min_hist_games=min_hist_games,
-                                min_hist_window=min_hist_window,
+    watchlist = create_watchlist(predictions, gw_data, min_hist_pct=min_hist_pct,
+                                max_hist_window=max_hist_window,
                                 must_include=must_include, must_exclude=must_exclude)
 
     # 6. Chip scenarios

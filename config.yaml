@@ -34,14 +34,16 @@ solver:
   # "rest_of_season" or an integer (e.g. 5 for 5-GW horizon)
   planning_horizon: rest_of_season
 
-  # Minimum 60+ minute games a player must have to enter the candidate pool.
-  # Lower = more players (less reliable). Higher = fewer players (more reliable).
-  min_hist_games: 4
+  # Fraction of the recent window a player must have started (60+ min) to enter
+  # the candidate pool. Lower = more players (less reliable). Higher = fewer
+  # players (more reliable). E.g. 0.6 = played 60+ min in >=60% of the window.
+  min_hist_pct: 0.6
 
-  # Only count appearances from the last N gameweeks when checking min_hist_games.
-  # Ensures players who haven't featured recently are filtered out even if they
-  # have enough total appearances across the season.
-  min_hist_window: 6
+  # Upper bound on how many recent gameweeks are considered when checking
+  # min_hist_pct. Early in the season, before this many GWs exist, the window
+  # shrinks to however many GWs have actually been played — there is no lower
+  # bound, so e.g. after GW1 a player who played is already in the watchlist.
+  max_hist_window: 6
 
   # Probability that each starting-XI player won't play (rotation/injury).
   # 0.10 means ~1.1 expected subs per GW. Set to 0.0 to ignore bench value.
@@ -81,7 +83,7 @@ chips:
 # After trigger_gw, the solver tops-up the transfer bank to transfer_count free transfers.
 
 transfer_topup:
-  enabled: true
+  enabled: false
   trigger_gw: 15
   transfer_count: 5
 
@@ -129,8 +131,8 @@ points_multiplier: []
 excluded_players: []
   # - 5    # Gabriel
 
-# Extra player IDs to force into the candidate pool even if they have fewer
-# appearances than min_hist_games.  Use for new signings, returning-from-injury
-# players, or anyone you trust despite limited game time this season.
+# Extra player IDs to force into the candidate pool even if they don't meet
+# min_hist_pct.  Use for new signings, returning-from-injury players, or anyone
+# you trust despite limited game time this season.
 extra_players: []
   # - 256  # Munoz — new signing, only 3 starts
