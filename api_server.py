@@ -88,6 +88,13 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+class NonPlayingEntry(BaseModel):
+    """One player who won't feature in a set of gameweeks. Mirrors the `non_playing`
+    shape in config.yaml so the API contract matches the documented YAML."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
 class OptimizeRequest(BaseModel):
     """Input payload for the /api/optimize endpoint."""
     team_id: int
@@ -96,12 +103,24 @@ class OptimizeRequest(BaseModel):
     use_chips: bool = True
     forced_lineup: list[int] = Field(default_factory=list)
     excluded_players: list[int] = Field(default_factory=list)
+    # Zero out these players' points for the listed GWs (injury/suspension/rotation).
+    # Note: `excluded_players` still wins over `extra_players` — create_watchlist drops
+    # must_exclude before it exempts must_include.
+    non_playing: list[NonPlayingEntry] = Field(default_factory=list)
+    # Force into the candidate pool even if they fail the min_hist_pct filter.
+    extra_players: list[int] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=30)
     max_scenarios: int = Field(default=50, ge=1, le=200)
     force_wildcard_gw: Optional[int] = None
     force_free_hit_gw: Optional[int] = None
     force_bench_boost_gw: Optional[int] = None
     force_triple_captain_gw: Optional[int] = None
+    # Chip-usage state. Auto-detected from the FPL API when left as None; set a value
+    # to override, e.g. 2 to hide a chip from the solver and save it for later.
+    wildcards_used: Optional[int] = Field(default=None, ge=0, le=2)
+    free_hits_used: Optional[int] = Field(default=None, ge=0, le=2)
+    bench_boost_used: Optional[int] = Field(default=None, ge=0, le=2)
+    triple_captain_used: Optional[int] = Field(default=None, ge=0, le=2)
 
 
 class SquadRequest(BaseModel):
@@ -399,17 +418,25 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     gw_data = _get_gw_data(bootstrap)
     predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
 
-    must_include = list(current_squad)
+    # extra_players bypasses the min_hist_pct filter — new signings, players just
+    # back from injury, anyone with too little recent game time to qualify on merit.
+    must_include = list(dict.fromkeys(list(current_squad) + list(req.extra_players)))
     watchlist = create_watchlist(
         predictions, gw_data,
         min_hist_games=4, min_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
     )
 
-    wildcards_used = detected_chips.get("wildcards_used", 0)
-    free_hits_used = detected_chips.get("free_hits_used", 0)
-    bench_boost_used = detected_chips.get("bench_boost_used", 0)
-    triple_captain_used = detected_chips.get("triple_captain_used", 0)
+    non_playing_tuples = [(e.player, list(e.gameweeks)) for e in req.non_playing if e.gameweeks] or None
+
+    # Explicit request values win over API detection; None means "use what we detected".
+    def _chip_state(override: Optional[int], key: str) -> int:
+        return override if override is not None else detected_chips.get(key, 0)
+
+    wildcards_used = _chip_state(req.wildcards_used, "wildcards_used")
+    free_hits_used = _chip_state(req.free_hits_used, "free_hits_used")
+    bench_boost_used = _chip_state(req.bench_boost_used, "bench_boost_used")
+    triple_captain_used = _chip_state(req.triple_captain_used, "triple_captain_used")
 
     if not req.use_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [], "bench_boost_gw": -1, "triple_captain_gw": -1, "force_wildcard_gw": None}]
@@ -439,6 +466,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
             predictions_df=predictions, gw_data_df=gw_data,
             watchlist_players=watchlist,
             forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
+            non_playing_players=non_playing_tuples,
         )
 
     best_result = None
@@ -449,7 +477,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
             planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
             points_multiplier_override=None,
             forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
-            non_playing_players=None,
+            non_playing_players=non_playing_tuples,
             first_gw_transfer_penalty=-1,
             sub_probability=0.10,
             bench_boost_gw=scenario["bench_boost_gw"],
