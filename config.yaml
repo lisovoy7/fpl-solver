@@ -40,18 +40,20 @@ solver:
   # (generate_predictions needs 60+ minute appearances, so it yields nothing in
   # GW1). Once the deadline passes, predictions are generated normally.
   # Set to null/0 to always use the normal pipeline.
-  # NOTE: while active, the min_hist_games filter is disabled (nobody has played
+  # NOTE: while active, the min_hist_pct filter is disabled (nobody has played
   # yet) and the proxy model assumes every player starts — check the squad it picks.
   points_pred_gw_threshold: 4
 
-  # Minimum 60+ minute games a player must have to enter the candidate pool.
-  # Lower = more players (less reliable). Higher = fewer players (more reliable).
-  min_hist_games: 4
+  # Fraction of the recent window a player must have started (60+ min) to enter
+  # the candidate pool. Lower = more players (less reliable). Higher = fewer
+  # players (more reliable). E.g. 0.6 = played 60+ min in >=60% of the window.
+  min_hist_pct: 0.6
 
-  # Only count appearances from the last N gameweeks when checking min_hist_games.
-  # Ensures players who haven't featured recently are filtered out even if they
-  # have enough total appearances across the season.
-  min_hist_window: 6
+  # Upper bound on how many recent gameweeks are considered when checking
+  # min_hist_pct. Early in the season, before this many GWs exist, the window
+  # shrinks to however many GWs have actually been played — there is no lower
+  # bound, so e.g. after GW1 a player who played is already in the watchlist.
+  max_hist_window: 6
 
   # Probability that each starting-XI player won't play (rotation/injury).
   # 0.10 means ~1.1 expected subs per GW. Set to 0.0 to ignore bench value.
@@ -91,7 +93,7 @@ chips:
 # After trigger_gw, the solver tops-up the transfer bank to transfer_count free transfers.
 
 transfer_topup:
-  enabled: true
+  enabled: false
   trigger_gw: 15
   transfer_count: 5
 
@@ -139,8 +141,270 @@ points_multiplier: []
 excluded_players: []
   # - 5    # Gabriel
 
-# Extra player IDs to force into the candidate pool even if they have fewer
-# appearances than min_hist_games.  Use for new signings, returning-from-injury
-# players, or anyone you trust despite limited game time this season.
-extra_players: []
-  # - 256  # Munoz — new signing, only 3 starts
+# Extra player IDs to force into the candidate pool even if they don't meet
+# min_hist_pct.  Use for new signings, returning-from-injury players, or anyone
+# you trust despite limited game time this season.
+#
+# Populated with all 218 GW1 expected starters (predicted lineups per team,
+# sourced from Fantasy Football Scout Aug 4-5 2026, cross-referenced with
+# BBC Sport Aug 6 2026). 2 players omitted — not yet in FPL DB:
+#   - Cameron Humphreys (IPS MID)
+#   - Lacroix (CRY DEF) — unregistered new signing
+extra_players:
+  # ── Arsenal (vs Coventry, Home) ───────────────────────────────
+  - 1      # David Raya (GK) — ARS
+  - 10     # Ben White (DEF) — ARS
+  - 11     # Cristhian Mosquera (DEF) — ARS
+  - 4      # Gabriel Magalhaes (DEF) — ARS
+  - 8      # Riccardo Calafiori (DEF) — ARS
+  - 15     # Martin Odegaard (MID) — ARS
+  - 7      # Myles Lewis-Skelly (MID) — ARS
+  - 26     # Kai Havertz (MID) — ARS
+  - 20     # Max Dowman (MID) — ARS
+  - 557    # Christos Tzolis (MID) — ARS
+  - 25     # Viktor Gyokeres (FWD) — ARS
+
+  # ── Aston Villa (@ Brighton, Away) ────────────────────────────
+  - 28     # Emiliano Martinez (GK) — AVL
+  - 32     # Matty Cash (DEF) — AVL
+  - 31     # Ezri Konsa (DEF) — AVL
+  - 34     # Pau Torres (DEF) — AVL
+  - 36     # Ian Maatsen (DEF) — AVL
+  - 54     # Joao Gomes (MID) — AVL
+  - 47     # Boubacar Kamara (MID) — AVL
+  - 45     # John McGinn (MID) — AVL
+  - 46     # Ross Barkley (MID) — AVL
+  - 41     # Emiliano Buendia (MID) — AVL
+  - 55     # Ollie Watkins (FWD) — AVL
+
+  # ── Bournemouth (@ Man City, Away) ────────────────────────────
+  - 57     # Djordje Petrovic (GK) — BOU
+  - 64     # Adam Smith (DEF) — BOU
+  - 60     # James Hill (DEF) — BOU
+  - 566    # Antonio Silva (DEF) — BOU
+  - 61     # Adrien Truffert (DEF) — BOU
+  - 73     # Tyler Adams (MID) — BOU
+  - 69     # Alex Scott (MID) — BOU
+  - 68     # Marcus Tavernier (MID) — BOU
+  - 70     # Justin Kluivert (MID) — BOU
+  - 67     # Rayan (MID) — BOU
+  - 79     # Evanilson (FWD) — BOU
+
+  # ── Brentford (vs Tottenham, Home) ────────────────────────────
+  - 82     # Caoimhin Kelleher (GK) — BRE
+  - 88     # Michael Kayode (DEF) — BRE
+  - 87     # Kristoffer Ajer (DEF) — BRE
+  - 84     # Nathan Collins (DEF) — BRE
+  - 86     # Keane Lewis-Potter (DEF) — BRE
+  - 102    # Yehor Yarmoliuk (MID) — BRE
+  - 98     # Vitaly Janelt (MID) — BRE
+  - 95     # Dango Ouattara (MID) — BRE
+  - 97     # Mathias Jensen (MID) — BRE
+  - 94     # Kevin Schade (MID) — BRE
+  - 106    # Igor Thiago (FWD) — BRE
+
+  # ── Brighton (vs Aston Villa, Home) ───────────────────────────
+  - 109    # Bart Verbruggen (GK) — BHA
+  - 113    # Ferdi Kadioglu (DEF) — BHA
+  - 504    # Luka Vuskovic (DEF) — BHA
+  - 116    # Lewis Dunk (DEF) — BHA
+  - 115    # Maxim De Cuyper (DEF) — BHA
+  - 131    # Carlos Baleba (MID) — BHA
+  - 124    # Pascal Gross (MID) — BHA
+  - 127    # Diego Gomez (MID) — BHA
+  - 123    # Jack Hinshelwood (MID) — BHA
+  - 122    # Yankuba Minteh (MID) — BHA
+  - 125    # Georginio Rutter (FWD) — BHA
+
+  # ── Chelsea (@ Fulham, Away) ──────────────────────────────────
+  - 140    # Robert Sanchez (GK) — CHE
+  - 152    # Marco Palestra (DEF) — CHE
+  - 200    # Maxence Lacroix (DEF) — CHE
+  - 149    # Levi Colwill (DEF) — CHE
+  - 148    # Jorrel Hato (DEF) — CHE
+  - 161    # Romeo Lavia (MID) — CHE
+  - 159    # Moises Caicedo (MID) — CHE
+  - 156    # Pedro Neto (MID) — CHE
+  - 154    # Cole Palmer (MID) — CHE
+  - 158    # Jamie Bynoe-Gittens (MID) — CHE
+  - 165    # Joao Pedro (FWD) — CHE
+
+  # ── Coventry City (@ Arsenal, Away) ───────────────────────────
+  - 110    # Carl Rushworth (GK) — COV
+  - 175    # Milan van Ewijk (DEF) — COV
+  - 173    # Bobby Thomas (DEF) — COV
+  - 182    # Aurele Amenda (DEF) — COV
+  - 176    # Jay Dasilva (DEF) — COV
+  - 184    # Matt Grimes (MID) — COV
+  - 104    # Frank Onyeka (MID) — COV
+  - 185    # Tatsuhiro Sakamoto (MID) — COV
+  - 188    # Victor Torp (MID) — COV
+  - 186    # Ephron Mason-Clark (MID) — COV
+  - 193    # Haji Wright (FWD) — COV
+
+  # ── Crystal Palace (@ Everton, Away) ──────────────────────────
+  - 198    # Dean Henderson (GK) — CRY
+  - 202    # Chris Richards (DEF) — CRY
+  - 203    # Jaydee Canvot (DEF) — CRY
+  - 201    # Daniel Munoz (DEF) — CRY
+  - 214    # Daichi Kamada (MID) — CRY
+  - 210    # Adam Wharton (MID) — CRY
+  - 204    # Tyrick Mitchell (MID) — CRY
+  - 208    # Ismaila Sarr (MID) — CRY
+  - 209    # Brennan Johnson (MID) — CRY
+  - 222    # Jorgen Strand Larsen (FWD) — CRY
+
+  # ── Everton (vs Crystal Palace, Home) ─────────────────────────
+  - 226    # Jordan Pickford (GK) — EVE
+  - 232    # Jake O'Brien (DEF) — EVE
+  - 229    # James Tarkowski (DEF) — EVE
+  - 230    # Jarrad Branthwaite (DEF) — EVE
+  - 233    # Vitaliy Mykolenko (DEF) — EVE
+  - 247    # Hayden Hackney (MID) — EVE
+  - 240    # Tim Iroegbunam (MID) — EVE
+  - 246    # Merlin Rohl (MID) — EVE
+  - 236    # Kiernan Dewsbury-Hall (MID) — EVE
+  - 237    # Iliman Ndiaye (MID) — EVE
+  - 249    # Thierno Barry (FWD) — EVE
+
+  # ── Fulham (vs Chelsea, Home) ─────────────────────────────────
+  - 250    # Bernd Leno (GK) — FUL
+  - 256    # Kenny Tete (DEF) — FUL
+  - 255    # Jorge Cuenca (DEF) — FUL
+  - 257    # Calvin Bassey (DEF) — FUL
+  - 254    # Antonee Robinson (DEF) — FUL
+  - 267    # Sasa Lukic (MID) — FUL
+  - 261    # Alex Iwobi (MID) — FUL
+  - 264    # Oscar Bobb (MID) — FUL
+  - 262    # Emile Smith Rowe (MID) — FUL
+  - 263    # Kevin (MID) — FUL
+  - 271    # Rodrigo Muniz (FWD) — FUL
+
+  # ── Hull City (vs Man United, Home) ───────────────────────────
+  - 274    # Jack Butland (GK) — HUL
+  - 280    # Lewie Coyle (DEF) — HUL
+  - 277    # John Egan (DEF) — HUL
+  - 279    # Semi Ajayi (DEF) — HUL
+  - 282    # Ryan Giles (DEF) — HUL
+  - 290    # Regan Slater (MID) — HUL
+  - 289    # Matt Crooks (MID) — HUL
+  - 286    # Mohamed Belloumi (MID) — HUL
+  - 292    # Abdulkadir Omur (MID) — HUL
+  - 287    # Liam Millar (MID) — HUL
+  - 295    # Oli McBurnie (FWD) — HUL
+
+  # ── Ipswich Town (vs Sunderland, Home) ────────────────────────
+  - 564    # Kjell Scherpen (GK) — IPS
+  - 308    # Darnell Furlong (DEF) — IPS
+  - 304    # Dara O'Shea (DEF) — IPS
+  - 306    # Jacob Greaves (DEF) — IPS
+  - 305    # Leif Davis (DEF) — IPS
+  - 309    # Marcelino Nunez (MID) — IPS
+  - 315    # Abdul Fatawu (MID) — IPS
+  - 324    # Anis Mehmeti (MID) — IPS
+  - 562    # Daizen Maeda (MID) — IPS
+  - 316    # Emersonn (FWD) — IPS
+
+  # ── Leeds United (@ Nottm Forest, Away) ───────────────────────
+  - 326    # Lucas Perri (GK) — LEE
+  - 329    # Joe Rodon (DEF) — LEE
+  - 327    # Jaka Bijol (DEF) — LEE
+  - 334    # Tarik Muharemovic (DEF) — LEE
+  - 330    # Jayden Bogle (DEF) — LEE
+  - 338    # Ethan Ampadu (MID) — LEE
+  - 345    # Ao Tanaka (MID) — LEE
+  - 332    # James Justin (MID) — LEE
+  - 260    # Harry Wilson (MID) — LEE
+  - 346    # Dominic Calvert-Lewin (MID) — LEE
+  - 335    # Anton Stach (FWD) — LEE
+
+  # ── Liverpool (@ Newcastle, Away) ─────────────────────────────
+  - 350    # Alisson Becker (GK) — LIV
+  - 357    # Jeremie Frimpong (DEF) — LIV
+  - 362    # Jeremy Jacquet (DEF) — LIV
+  - 356    # Virgil van Dijk (DEF) — LIV
+  - 358    # Milos Kerkez (DEF) — LIV
+  - 371    # Ryan Gravenberch (MID) — LIV
+  - 368    # Dominik Szoboszlai (MID) — LIV
+  - 369    # Rio Ngumoha (MID) — LIV
+  - 366    # Florian Wirtz (MID) — LIV
+  - 367    # Cody Gakpo (MID) — LIV
+  - 379    # Alexander Isak (FWD) — LIV
+
+  # ── Manchester City (vs Bournemouth, Home) ────────────────────
+  - 384    # Gianluigi Donnarumma (GK) — MCI
+  - 389    # Matheus Nunes (DEF) — MCI
+  - 393    # Abdukodir Khusanov (DEF) — MCI
+  - 391    # Josko Gvardiol (DEF) — MCI
+  - 392    # Rayan Ait-Nouri (DEF) — MCI
+  - 406    # Mateo Kovacic (MID) — MCI
+  - 481    # Elliot Anderson (MID) — MCI
+  - 397    # Antoine Semenyo (MID) — MCI
+  - 398    # Phil Foden (MID) — MCI
+  - 400    # Jeremy Doku (MID) — MCI
+  - 411    # Erling Haaland (FWD) — MCI
+
+  # ── Manchester United (@ Hull City, Away) ─────────────────────
+  - 412    # Senne Lammens (GK) — MUN
+  - 417    # Diogo Dalot (DEF) — MUN
+  - 420    # Leny Yoro (DEF) — MUN
+  - 418    # Harry Maguire (DEF) — MUN
+  - 423    # Luke Shaw (DEF) — MUN
+  - 430    # Mason Mount (MID) — MUN
+  - 162    # Andrey Santos (MID) — MUN
+  - 431    # Amad Diallo (MID) — MUN
+  - 426    # Bruno Fernandes (MID) — MUN
+  - 428    # Matheus Cunha (MID) — MUN
+  - 427    # Bryan Mbeumo (FWD) — MUN
+
+  # ── Newcastle United (vs Liverpool, Home) ─────────────────────
+  - 442    # Nick Pope (GK) — NEW
+  - 459    # Lewis Miley (DEF) — NEW
+  - 445    # Malick Thiaw (DEF) — NEW
+  - 447    # Sven Botman (DEF) — NEW
+  - 449    # Lewis Hall (DEF) — NEW
+  - 452    # Bruno Guimaraes (MID) — NEW
+  - 458    # Joelinton (MID) — NEW
+  - 454    # Anthony Elanga (MID) — NEW
+  - 456    # Jacob Ramsey (MID) — NEW
+  - 453    # Harvey Barnes (MID) — NEW
+  - 465    # William Osula (FWD) — NEW
+
+  # ── Nottingham Forest (vs Leeds, Home) ────────────────────────
+  - 467    # Matz Sels (GK) — NFO
+  - 474    # Jair (DEF) — NFO
+  - 471    # Nikola Milenkovic (DEF) — NFO
+  - 472    # Murillo (DEF) — NFO
+  - 473    # Ola Aina (DEF) — NFO
+  - 487    # Nicolas Dominguez (MID) — NFO
+  - 488    # Ibrahim Sangare (MID) — NFO
+  - 469    # Neco Williams (MID) — NFO
+  - 480    # Morgan Gibbs-White (MID) — NFO
+  - 491    # Igor Jesus (MID) — NFO
+  - 490    # Chris Wood (FWD) — NFO
+
+  # ── Sunderland (@ Ipswich, Away) ──────────────────────────────
+  - 529    # Robin Roefs (GK) — SUN
+  - 533    # Nordi Mukiele (DEF) — SUN
+  - 532    # Daniel Ballard (DEF) — SUN
+  - 535    # Omar Alderete (DEF) — SUN
+  - 536    # Reinildo Mandava (DEF) — SUN
+  - 544    # Granit Xhaka (MID) — SUN
+  - 545    # Noah Sadiki (MID) — SUN
+  - 534    # Trai Hume (MID) — SUN
+  - 542    # Enzo Le Fee (MID) — SUN
+  - 551    # Nilson Angulo (MID) — SUN
+  - 552    # Brian Brobbey (FWD) — SUN
+
+  # ── Tottenham (@ Brentford, Away) ─────────────────────────────
+  - 496    # Antonin Kinsky (GK) — TOT
+  - 499    # Pedro Porro (DEF) — TOT
+  - 112    # Jan Paul van Hecke (DEF) — TOT
+  - 503    # Micky van de Ven (DEF) — TOT
+  - 502    # Andy Robertson (DEF) — TOT
+  - 455    # Sandro Tonali (MID) — TOT
+  - 525    # Mateus Fernandes (MID) — TOT
+  - 512    # Mohammed Kudus (MID) — TOT
+  - 519    # Conor Gallagher (MID) — TOT
+  - 514    # Mathys Tel (MID) — TOT
+  - 526    # Dominic Solanke (FWD) — TOT

@@ -105,8 +105,8 @@ Control how the MILP optimization behaves. All have sensible defaults.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `solver.planning_horizon` | int or `"rest_of_season"` | `rest_of_season` | How many GWs ahead to plan. `rest_of_season` plans through GW 38. An integer like `5` plans a short horizon (faster, useful for testing) |
-| `solver.min_hist_games` | int | `7` | Minimum number of 60+ minute appearances a player must have to enter the candidate pool. Only games within the `min_hist_window` are counted |
-| `solver.min_hist_window` | int | `10` | Only count appearances from the last N gameweeks when checking `min_hist_games`. Ensures players who haven't featured recently are filtered out even if they have enough total appearances across the season |
+| `solver.min_hist_pct` | float | `0.6` | Fraction of the recent window a player must have started (60+ min) to enter the candidate pool, e.g. `0.6` = played 60+ min in at least 60% of the window (rounded up) |
+| `solver.max_hist_window` | int | `6` | Upper bound on how many recent gameweeks are considered when checking `min_hist_pct`. Early in the season, before this many GWs exist, the window shrinks to however many GWs have actually been played — there's no lower bound, so a player who started GW1 already qualifies |
 | `solver.sub_probability` | float | `0.10` | Probability that each starting-XI player won't play on any given GW (rotation risk). This determines how much bench value matters. `0.10` means ~1.1 expected substitutions per GW. Set to `0.0` to ignore bench value entirely |
 | `solver.first_gw_transfer_penalty` | float | `-1` | Artificial points penalty per transfer made in the first GW of the horizon. Prevents the solver from making transfers that only look good because GW 1 is the most "certain" in the plan. Negative value = mild penalty |
 | `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. Increase if solutions are suboptimal (solver reports gap > 0) |
@@ -230,7 +230,7 @@ excluded_players:
 
 #### `extra_players`
 
-Player IDs to force into the candidate pool even if they don't meet the `min_hist_games` threshold. By default, a player needs at least `min_hist_games` appearances of 60+ minutes to be considered. Use `extra_players` to bypass this filter for players you trust despite limited game time — e.g. new signings, returning-from-injury players, or promising players who've only recently broken into the starting XI.
+Player IDs to force into the candidate pool even if they don't meet the `min_hist_pct` threshold. By default, a player needs at least `min_hist_pct` of the recent window in 60+ minute appearances to be considered. Use `extra_players` to bypass this filter for players you trust despite limited game time — e.g. new signings, returning-from-injury players, or promising players who've only recently broken into the starting XI.
 
 ```yaml
 extra_players:

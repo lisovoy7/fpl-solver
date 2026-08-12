@@ -4,6 +4,7 @@ All data passed as parameters; no hardcoded file paths.
 """
 
 import logging
+import math
 from typing import List, Optional
 
 import pandas as pd
@@ -14,8 +15,8 @@ logger = logging.getLogger(__name__)
 def create_watchlist(
     predictions: pd.DataFrame,
     gw_data: pd.DataFrame,
-    min_hist_games: int = 3,
-    min_hist_window: int = 10,
+    min_hist_pct: float = 0.6,
+    max_hist_window: int = 6,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,
 ) -> List[int]:
@@ -25,8 +26,12 @@ def create_watchlist(
     Args:
         predictions: Full predictions (element, name, position, predicted_points, hist_games).
         gw_data: Current season GW data (element, value, GW for costs).
-        min_hist_games: Minimum 60+ min games threshold.
-        min_hist_window: Only count games from the last N GWs when checking min_hist_games.
+        min_hist_pct: Fraction of the recent window a player must have started
+            (60+ min) to enter the candidate pool, e.g. 0.6 = 60%.
+        max_hist_window: Upper bound on how many recent GWs are considered. Early
+            in the season, before this many GWs exist, the window shrinks to
+            however many GWs have actually been played — there is no lower bound,
+            so a single-GW season still lets qualifying players through.
         must_include: Player IDs to always include (e.g. current squad).
         must_exclude: Player IDs to always exclude.
 
@@ -36,20 +41,26 @@ def create_watchlist(
     must_include = must_include or []
     must_exclude = must_exclude or []
 
-    # 1. Count recent 60+ min appearances within the last min_hist_window GWs
+    # 1. Count recent 60+ min appearances within the last `window_size` GWs,
+    #    where window_size is capped at max_hist_window but shrinks to whatever
+    #    GWs actually exist early in the season.
     gw_col = "GW" if "GW" in gw_data.columns else None
     if gw_col:
         max_gw = int(gw_data[gw_col].max())
-        window_start = max_gw - min_hist_window + 1
+        window_size = min(max_gw, max_hist_window)
+        window_start = max_gw - window_size + 1
         recent_gw = gw_data[(gw_data[gw_col] >= window_start) & (gw_data["minutes"] >= 60)]
         recent_counts = recent_gw.groupby("element").size().reset_index(name="recent_hist_games")
+        min_hist_games = math.ceil(window_size * min_hist_pct)
         logger.info(
-            "Recent window: GW %d-%d (%d GWs), %d players with 60+ min appearances",
-            window_start, max_gw, min_hist_window, len(recent_counts),
+            "Recent window: GW %d-%d (%d GWs), requiring >= %d appearances (%.0f%%), "
+            "%d players with 60+ min appearances",
+            window_start, max_gw, window_size, min_hist_games, min_hist_pct * 100, len(recent_counts),
         )
     else:
         logger.warning("No GW column in gw_data — falling back to all-time hist_games")
         recent_counts = None
+        min_hist_games = 0
 
     # 2. Total expected points per player
     pred_totals = (

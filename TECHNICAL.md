@@ -114,7 +114,7 @@ For each (player, fixture) combination, compute predicted points for 9 component
 
 #### 1. Minutes Played
 - **Formula:** `predicted_points = 2.0` (flat)
-- **Logic:** Every player who qualifies (meets `min_hist_games`) is assumed to play 60+ minutes and earn the 2-point appearance award. No multiplier applied.
+- **Logic:** Every player who qualifies (meets `min_hist_pct`) is assumed to play 60+ minutes and earn the 2-point appearance award. No multiplier applied.
 
 #### 2. Goals Scored (xG-based)
 - **Formula:** `predicted_points = avg_norm_xG × fixture_multiplier × goal_points[position]`
@@ -407,7 +407,7 @@ The full pipeline executed by `python run.py`:
 4. **Fetch fixtures** — all 380 PL fixtures. Apply `fixture_overrides` from config (DGW/BGW corrections).
 5. **Fetch GW data** — per-player per-GW stats for all ~820 players (this is the slow step, ~2-3 minutes).
 6. **Generate predictions** — run the prediction engine (Steps 1-4 above).
-7. **Build watchlist** — filter players by `min_hist_games` within the last `min_hist_window` GWs, apply `must_include`/`must_exclude`.
+7. **Build watchlist** — filter players by `min_hist_pct` within the last `max_hist_window` GWs (window shrinks early-season), apply `must_include`/`must_exclude`.
 8. **Enumerate chip scenarios** — generate all valid chip combinations.
 9. **Pre-calculate Free Hit benefits** — solve the FH sub-problem for every GW in the horizon.
 10. **Solve each scenario** — for each chip scenario, create and solve the main MILP. Track the best solution.

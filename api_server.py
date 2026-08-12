@@ -33,7 +33,7 @@ except Exception:
 
 _CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
-from fpl import api, config as cfg
+from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import generate_chip_scenarios, calculate_free_hit_benefits_for_horizon
@@ -121,6 +121,18 @@ class OptimizeRequest(BaseModel):
     free_hits_used: Optional[int] = Field(default=None, ge=0, le=2)
     bench_boost_used: Optional[int] = Field(default=None, ge=0, le=2)
     triple_captain_used: Optional[int] = Field(default=None, ge=0, le=2)
+    # ── Squad/budget overrides ────────────────────────────────────────────────
+    # FPL's public API only reports a squad as of the last deadline that has passed, so
+    # it is stale for anyone who has since made a transfer, and pre-season it reports no
+    # squad at all. When the caller has a squad the user has explicitly confirmed, that
+    # beats what we can fetch — plan from theirs.
+    #
+    # `squad` is 15 element IDs. `total_budget` is squad selling value + bank in £m
+    # (e.g. 100.0), matching the shape /api/squad returns; internally the pipeline works
+    # in tenths, so it's converted on the way in. Send both together: a squad with a
+    # budget derived from a different squad is worse than either alone.
+    squad: Optional[list[int]] = Field(default=None, min_length=15, max_length=15)
+    total_budget: Optional[float] = Field(default=None, gt=0, le=200)
 
 
 class SquadRequest(BaseModel):
@@ -405,25 +417,53 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     if squad_gw in free_hit_gws and squad_gw > 1:
         squad_gw -= 1
 
-    team_data = api.fetch_team_data(req.team_id, squad_gw)
-    current_squad = team_data["squad"]
-    _, selling_summary = api.get_squad_selling_prices(req.team_id, squad_gw)
-    total_budget = selling_summary["correct_budget"]
+    # A caller-supplied squad is one the user has confirmed, so it outranks whatever the
+    # FPL API reports — which is only ever as of the last deadline, and is empty
+    # pre-season. Skipping the fetches also saves two API round trips.
+    if req.squad:
+        current_squad = list(req.squad)
+        logger.info("Using caller-supplied squad for team %d", req.team_id)
+    else:
+        team_data = api.fetch_team_data(req.team_id, squad_gw)
+        current_squad = team_data["squad"]
+
+    if req.total_budget is not None:
+        # Pipeline works in tenths of a million throughout; the API takes £m.
+        total_budget = int(round(req.total_budget * 10))
+    else:
+        _, selling_summary = api.get_squad_selling_prices(req.team_id, squad_gw)
+        total_budget = selling_summary["correct_budget"]
 
     multipliers = pd.read_csv(DATA_DIR / "multipliers.csv")
     team_tiers = pd.read_csv(DATA_DIR / "team_tiers.csv")
     current_season_tiers = team_tiers[team_tiers["season"] == season].copy()
 
     fixtures = api.fetch_current_fixtures(bootstrap)
-    gw_data = _get_gw_data(bootstrap)
-    predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
+
+    # Early in the season there aren't enough 60+ minute appearances for
+    # generate_predictions() to build player averages from (it needs THIS season's
+    # per-fixture history, which is empty pre-season and for the first few GWs).
+    # Mirrors the same fallback run.py uses — see fpl/proxy_predict.py.
+    solver_config = cfg.load_config()
+    points_pred_gw_threshold = cfg.get_solver_params(solver_config).get("points_pred_gw_threshold")
+    use_proxy = proxy_predict.should_use_proxy(bootstrap, points_pred_gw_threshold, DATA_DIR)
+
+    if use_proxy:
+        gw_data = proxy_predict.synthesize_gw_data(bootstrap)
+        predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
+    else:
+        gw_data = _get_gw_data(bootstrap)
+        predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
 
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
     must_include = list(dict.fromkeys(list(current_squad) + list(req.extra_players)))
+    # Synthesized gw_data has nobody with real appearances — the filter would
+    # exclude everyone, so it's disabled while proxy predictions are in use.
+    min_hist_pct = 0.0 if use_proxy else 0.6
     watchlist = create_watchlist(
         predictions, gw_data,
-        min_hist_games=4, min_hist_window=6,
+        min_hist_pct=min_hist_pct, max_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
     )
 
