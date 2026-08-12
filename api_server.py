@@ -121,6 +121,18 @@ class OptimizeRequest(BaseModel):
     free_hits_used: Optional[int] = Field(default=None, ge=0, le=2)
     bench_boost_used: Optional[int] = Field(default=None, ge=0, le=2)
     triple_captain_used: Optional[int] = Field(default=None, ge=0, le=2)
+    # ── Squad/budget overrides ────────────────────────────────────────────────
+    # FPL's public API only reports a squad as of the last deadline that has passed, so
+    # it is stale for anyone who has since made a transfer, and pre-season it reports no
+    # squad at all. When the caller has a squad the user has explicitly confirmed, that
+    # beats what we can fetch — plan from theirs.
+    #
+    # `squad` is 15 element IDs. `total_budget` is squad selling value + bank in £m
+    # (e.g. 100.0), matching the shape /api/squad returns; internally the pipeline works
+    # in tenths, so it's converted on the way in. Send both together: a squad with a
+    # budget derived from a different squad is worse than either alone.
+    squad: Optional[list[int]] = Field(default=None, min_length=15, max_length=15)
+    total_budget: Optional[float] = Field(default=None, gt=0, le=200)
 
 
 class SquadRequest(BaseModel):
@@ -405,10 +417,22 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     if squad_gw in free_hit_gws and squad_gw > 1:
         squad_gw -= 1
 
-    team_data = api.fetch_team_data(req.team_id, squad_gw)
-    current_squad = team_data["squad"]
-    _, selling_summary = api.get_squad_selling_prices(req.team_id, squad_gw)
-    total_budget = selling_summary["correct_budget"]
+    # A caller-supplied squad is one the user has confirmed, so it outranks whatever the
+    # FPL API reports — which is only ever as of the last deadline, and is empty
+    # pre-season. Skipping the fetches also saves two API round trips.
+    if req.squad:
+        current_squad = list(req.squad)
+        logger.info("Using caller-supplied squad for team %d", req.team_id)
+    else:
+        team_data = api.fetch_team_data(req.team_id, squad_gw)
+        current_squad = team_data["squad"]
+
+    if req.total_budget is not None:
+        # Pipeline works in tenths of a million throughout; the API takes £m.
+        total_budget = int(round(req.total_budget * 10))
+    else:
+        _, selling_summary = api.get_squad_selling_prices(req.team_id, squad_gw)
+        total_budget = selling_summary["correct_budget"]
 
     multipliers = pd.read_csv(DATA_DIR / "multipliers.csv")
     team_tiers = pd.read_csv(DATA_DIR / "team_tiers.csv")
