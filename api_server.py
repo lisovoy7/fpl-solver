@@ -33,7 +33,7 @@ except Exception:
 
 _CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
-from fpl import api, config as cfg
+from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import generate_chip_scenarios, calculate_free_hit_benefits_for_horizon
@@ -439,15 +439,31 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     current_season_tiers = team_tiers[team_tiers["season"] == season].copy()
 
     fixtures = api.fetch_current_fixtures(bootstrap)
-    gw_data = _get_gw_data(bootstrap)
-    predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
+
+    # Early in the season there aren't enough 60+ minute appearances for
+    # generate_predictions() to build player averages from (it needs THIS season's
+    # per-fixture history, which is empty pre-season and for the first few GWs).
+    # Mirrors the same fallback run.py uses — see fpl/proxy_predict.py.
+    solver_config = cfg.load_config()
+    points_pred_gw_threshold = cfg.get_solver_params(solver_config).get("points_pred_gw_threshold")
+    use_proxy = proxy_predict.should_use_proxy(bootstrap, points_pred_gw_threshold, DATA_DIR)
+
+    if use_proxy:
+        gw_data = proxy_predict.synthesize_gw_data(bootstrap)
+        predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
+    else:
+        gw_data = _get_gw_data(bootstrap)
+        predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
 
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
     must_include = list(dict.fromkeys(list(current_squad) + list(req.extra_players)))
+    # Synthesized gw_data has nobody with real appearances — the filter would
+    # exclude everyone, so it's disabled while proxy predictions are in use.
+    min_hist_pct = 0.0 if use_proxy else 0.6
     watchlist = create_watchlist(
         predictions, gw_data,
-        min_hist_pct=0.6, max_hist_window=6,
+        min_hist_pct=min_hist_pct, max_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
     )
 
