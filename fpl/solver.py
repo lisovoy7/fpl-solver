@@ -680,6 +680,7 @@ class FPLSolver:
                     logger.warning("Player %d not found in watchlist - skipping forced lineup", player_id)
                     continue
 
+            out_of_range_gws = []
             for gw in forced_gws:
                 if gw in fh_gw_set:
                     logger.debug("  Player %d (%s) forced lineup skipped for FH GW %d", player_id, player_name, gw)
@@ -695,10 +696,15 @@ class FPLSolver:
                     )
                     logger.debug("  Player %d (%s) forced to start in GW %d", player_id, player_name, gw)
                 else:
-                    logger.warning(
-                        "  Player %d forced lineup for GW %d outside planning horizon",
-                        player_id, gw,
-                    )
+                    out_of_range_gws.append(gw)
+
+            if out_of_range_gws:
+                # One line per player, not per GW — see the matching comment in
+                # _add_non_playing_player_constraints for why that matters here.
+                logger.debug(
+                    "  Player %d (%s) forced lineup outside planning horizon for GWs %s",
+                    player_id, player_name, out_of_range_gws,
+                )
 
     def _add_non_playing_player_constraints(self) -> None:
         """Log non-playing overrides (handled in objective)."""
@@ -714,15 +720,23 @@ class FPLSolver:
                 if len(player_data) > 0:
                     player_name = player_data.iloc[0]['name']
 
-            for gw in non_playing_gws:
-                internal_gw = gw - self.start_gw + 1
-                if 1 <= internal_gw <= self.T:
-                    logger.debug("  Player %d (%s) will get 0 points in GW %d", player_id, player_name, gw)
-                else:
-                    logger.warning(
-                        "  Player %d non-playing override for GW %d outside planning horizon",
-                        player_id, gw,
-                    )
+            in_range = [gw for gw in non_playing_gws if 1 <= gw - self.start_gw + 1 <= self.T]
+            out_of_range_count = len(non_playing_gws) - len(in_range)
+
+            if in_range:
+                logger.debug("  Player %d (%s) will get 0 points in GWs %s", player_id, player_name, in_range)
+            if out_of_range_count:
+                # Routine, not actionable — an "unknown return date" absence commonly spans
+                # the rest of the season while the horizon only covers a few GWs. One line
+                # per player, not per GW: this loop runs once per (player, gw) in
+                # non_playing_players, which for a long absence and a short horizon can mean
+                # dozens of out-of-range GWs per player — logging each at WARNING is enough
+                # log volume, under Cloud Run's request-scoped CPU throttling, to stretch an
+                # otherwise sub-second call into minutes.
+                logger.debug(
+                    "  Player %d (%s): %d non-playing GWs outside planning horizon",
+                    player_id, player_name, out_of_range_count,
+                )
 
     def _add_bgw_constraints(self) -> None:
         """Prevent starting/captaining players with no fixture (BGW).
