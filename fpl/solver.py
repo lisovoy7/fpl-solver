@@ -50,9 +50,6 @@ class FPLSolver:
         budget: float,
         start_gw: int,
         solver_name: str = 'CBC',
-        afcon_enabled: bool = True,
-        afcon_trigger_gw: int = 15,
-        afcon_transfer_count: int = 5,
         points_multiplier_override: Optional[List[tuple]] = None,
         forced_lineup_players: Optional[List[tuple]] = None,
         non_playing_players: Optional[List[tuple]] = None,
@@ -71,9 +68,6 @@ class FPLSolver:
             budget: Total budget in units (100 = 10.0M).
             start_gw: Starting gameweek for optimization.
             solver_name: MILP solver to use ('CBC', 'GUROBI', etc.).
-            afcon_enabled: Enable AFCON transfer top-up rule.
-            afcon_trigger_gw: Gameweek after which AFCON transfers are topped up.
-            afcon_transfer_count: Number of transfers to top up to for AFCON.
             points_multiplier_override: List of (player_id, multiplier) tuples.
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
@@ -88,9 +82,6 @@ class FPLSolver:
         self.budget = budget
         self.start_gw = start_gw
         self.solver_name = solver_name
-        self.afcon_enabled = afcon_enabled
-        self.afcon_trigger_gw = afcon_trigger_gw
-        self.afcon_transfer_count = afcon_transfer_count
         self.points_multiplier_override = points_multiplier_override or []
         self.forced_lineup_players = forced_lineup_players or []
         self.non_playing_players = non_playing_players or []
@@ -504,27 +495,16 @@ class FPLSolver:
 
         gameweeks = list(range(1, self.T + 1))
 
-        if self.afcon_enabled and self.start_gw == self.afcon_trigger_gw + 1:
-            effective_initial_transfers = self.afcon_transfer_count
-            logger.debug("AFCON rule applied: initial transfers set to %d", effective_initial_transfers)
-        else:
-            effective_initial_transfers = self.initial_transfers
-
-        self.prob += (self.variables['A'][1] == effective_initial_transfers, "Initial_Transfers")
+        self.prob += (self.variables['A'][1] == self.initial_transfers, "Initial_Transfers")
 
         M = TOTAL_SQUAD_SIZE
 
         for t in range(1, self.T):
             actual_gw = self.start_gw + t - 1
             free_hit_override = actual_gw in self.free_hit_gws
-            afcon_override = self.afcon_enabled and actual_gw == self.afcon_trigger_gw
 
             if free_hit_override:
                 self.prob += (self.variables['A'][t + 1] == self.variables['A'][t], f"FreeHit_Transfer_Preserve_{actual_gw}")
-                self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
-                continue
-            elif afcon_override:
-                self.prob += (self.variables['A'][t + 1] == self.afcon_transfer_count, f"AFCON_Transfer_Override_{t}")
                 self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
                 continue
 

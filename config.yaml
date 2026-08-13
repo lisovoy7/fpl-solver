@@ -113,14 +113,6 @@ chips:
   # # force_triple_captain_gw: 34
   # force_wildcard_gw: 32
 
-# ---------- AFCON Transfer top-up rule ----------
-# After trigger_gw, the solver tops-up the transfer bank to transfer_count free transfers.
-
-transfer_topup:
-  enabled: false
-  trigger_gw: 15
-  transfer_count: 5
-
 # ---------- Fixture overrides (DGW / BGW) ----------
 # Override the gameweek assignment of specific fixtures.  Use this when the
 # official schedule changes (postponements, double gameweeks, blank gameweeks)

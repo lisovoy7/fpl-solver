@@ -596,7 +596,6 @@ def main() -> None:
         )
 
     # 7. Solve each scenario
-    transfer_topup = config.get("transfer_topup", {})
     sub_probability = solver_params.get("sub_probability", 0.10)
     first_gw_penalty = solver_params.get("first_gw_transfer_penalty", -1)
     time_limit = solver_params.get("time_limit_per_scenario", 15)
@@ -612,9 +611,6 @@ def main() -> None:
         "horizon": horizon,
         "budget": total_budget,
         "start_gw": current_gw,
-        "afcon_enabled": transfer_topup.get("enabled", True),
-        "afcon_trigger_gw": transfer_topup.get("trigger_gw", 15),
-        "afcon_transfer_count": transfer_topup.get("transfer_count", 5),
         "points_multiplier": overrides.get("points_multiplier"),
         "forced_lineup": overrides.get("forced_lineup"),
         "non_playing": overrides.get("non_playing"),

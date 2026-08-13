@@ -124,7 +124,7 @@ class OptimizeRequest(BaseModel):
     non_playing: list[NonPlayingEntry] = Field(default_factory=list)
     # Force into the candidate pool even if they fail the min_hist_pct filter.
     extra_players: list[int] = Field(default_factory=list)
-    time_limit_per_scenario: int = Field(default=10, ge=5, le=30)
+    time_limit_per_scenario: int = Field(default=10, ge=5, le=90)
     max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
     force_free_hit_gw: Optional[int] = None
@@ -555,9 +555,6 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
         "horizon": horizon,
         "budget": total_budget,
         "start_gw": current_gw,
-        "afcon_enabled": True,
-        "afcon_trigger_gw": 15,
-        "afcon_transfer_count": 5,
         "points_multiplier": None,
         "forced_lineup": forced_lineup_tuples if req.forced_lineup else None,
         "non_playing": non_playing_tuples,

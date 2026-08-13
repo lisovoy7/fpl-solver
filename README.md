@@ -151,16 +151,6 @@ chips:
 
 **Example**: If you know GW 33 is a Double Gameweek and you want to use Free Hit there, set `force_free_hit_gw: 33`. The solver will only generate scenarios with FH on GW 33, instead of testing FH on every eligible GW.
 
-### Transfer Top-up
-
-Models a mid-season transfer window (e.g. AFCON, injury crisis) where the solver is allowed extra free transfers at a specific GW.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `transfer_topup.enabled` | bool | `true` | Whether the top-up rule is active |
-| `transfer_topup.trigger_gw` | int | `15` | The GW at which extra transfers become available |
-| `transfer_topup.transfer_count` | int | `5` | Number of extra free transfers granted at `trigger_gw` |
-
 ### Fixture Overrides
 
 Override the gameweek assignment of specific fixtures. Use this when the Premier League reschedules matches (postponements, double gameweeks, blank gameweeks) and the FPL API hasn't been updated yet. Each entry moves a fixture (identified by home and away team IDs) to a new GW. Team IDs can be found in `data/team_tiers.csv`.
