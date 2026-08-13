@@ -27,6 +27,7 @@ from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import (
     generate_chip_scenarios, calculate_free_hit_benefits_for_horizon,
     triple_captain_candidate_gws, find_best_triple_captain_gw,
+    bench_boost_candidate_gws, find_best_bench_boost_gw,
 )
 from fpl.watchlist import create_watchlist
 from fpl.scenario_runner import build_solver, default_worker_count, solve_scenarios
@@ -532,15 +533,24 @@ def main() -> None:
     if args.force_bench_boost_gw is not None:
         force_bench_boost_gw = args.force_bench_boost_gw
 
+    bench_boost_used_first_half = min(bench_boost_used, 1)
+    bench_boost_used_second_half = max(0, bench_boost_used - 1)
     triple_captain_used_first_half = min(triple_captain_used, 1)
     triple_captain_used_second_half = max(0, triple_captain_used - 1)
 
-    # Triple Captain only ever adds a fixed bonus on the plan's own best
-    # captain GW — it can't change who's captained, since the multiplier is
-    # uniform across players (see find_best_triple_captain_gw). So instead of
-    # multiplying it into the FH x BB scenario count, solve FH x BB with TC
-    # off, then score+place TC post-hoc. Skipped when TC is forced (already
-    # pinned) or fully spent (nothing left to place).
+    # Neither chip changes anything about the plan except which GW it lands on
+    # relative to its own already-solved lineup (Triple Captain exactly — the
+    # multiplier is uniform across players, so it can't change who's
+    # captained; Bench Boost approximately — see find_best_bench_boost_gw). So
+    # instead of multiplying either into the FH x BB scenario count, solve
+    # FH-only with both off, then score+place both post-hoc. Skipped per-chip
+    # when that chip is forced (already pinned) or fully spent (nothing left
+    # to place).
+    defer_bench_boost = (
+        not args.no_chips
+        and force_bench_boost_gw is None
+        and (bench_boost_used_first_half < 1 or bench_boost_used_second_half < 1)
+    )
     defer_triple_captain = (
         not args.no_chips
         and force_triple_captain_gw is None
@@ -557,8 +567,8 @@ def main() -> None:
             planning_horizon=horizon,
             free_hits_used_first_half=min(free_hits_used, 1),
             free_hits_used_second_half=max(0, free_hits_used - 1),
-            bench_boost_used_first_half=min(bench_boost_used, 1),
-            bench_boost_used_second_half=max(0, bench_boost_used - 1),
+            bench_boost_used_first_half=1 if defer_bench_boost else bench_boost_used_first_half,
+            bench_boost_used_second_half=1 if defer_bench_boost else bench_boost_used_second_half,
             triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
             triple_captain_used_second_half=1 if defer_triple_captain else triple_captain_used_second_half,
             force_free_hit_gw=force_free_hit_gw,
@@ -650,7 +660,7 @@ def main() -> None:
             "free_hit_benefit": fh_total,
             "total_points": total_points,
             "solution": raw["solution"],
-            "captain_points": raw["captain_points"],
+            "squad_points": raw["squad_points"],
             "scenario": scenario,
         }
         scenario_results.append(result)
@@ -663,55 +673,100 @@ def main() -> None:
         logger.info("Best of %d solved scenarios: %s (%.1f pts)",
                     len(scenario_results), best_result["scenario_name"], best_total)
 
-    # Score every solved FH x BB plan's best legal Triple Captain GW, then
-    # re-solve only the top candidates as full MILPs (TC's placement can shift
-    # the wildcard GW the solver picks, so the heuristic score alone isn't
+    # Score every solved FH-only plan's best legal Bench Boost GW and/or Triple
+    # Captain GW (whichever is deferred — see the comment above
+    # defer_bench_boost), then re-solve only the top-scored (FH, BB, TC)
+    # combinations as full MILPs (either chip's placement can shift the
+    # wildcard GW the solver picks, so the heuristic score alone isn't
     # trustworthy enough to skip the re-solve).
-    if defer_triple_captain and scenario_results:
+    if (defer_bench_boost or defer_triple_captain) and scenario_results:
+        bb_gws = bench_boost_candidate_gws(
+            start_gw=current_gw, planning_horizon=horizon,
+            used_first_half=bench_boost_used_first_half,
+            used_second_half=bench_boost_used_second_half,
+        ) if defer_bench_boost else []
         tc_gws = triple_captain_candidate_gws(
             start_gw=current_gw, planning_horizon=horizon,
             used_first_half=triple_captain_used_first_half,
             used_second_half=triple_captain_used_second_half,
-        )
-        tc_ranked = []
+        ) if defer_triple_captain else []
+
+        ranked = []
         for result in scenario_results:
             wildcard_gws = [
                 current_gw + t - 1
                 for t, tr in result["solution"]["transfers"].items()
                 if tr.get("wildcard_active")
             ]
-            tc_gw, tc_bonus = find_best_triple_captain_gw(
-                captains_by_t=result["solution"]["captains"],
-                expected_points=result["captain_points"],
-                wildcard_gws=wildcard_gws,
-                start_gw=current_gw, horizon=horizon,
-                free_hit_gws=result["free_hit_gws"],
-                bench_boost_gw=result["bench_boost_gw"],
-                candidate_gws=tc_gws,
-                sub_probability=sub_probability,
-            )
-            if tc_gw is not None:
-                tc_ranked.append((result, tc_gw, tc_bonus))
 
-        tc_ranked.sort(key=lambda item: item[0]["total_points"] + item[2], reverse=True)
-        tc_top_k = solver_params.get("triple_captain_candidates", 5)
-        logger.info("Re-solving top %d Triple Captain candidate(s) (out of %d scored)...",
-                    min(tc_top_k, len(tc_ranked)), len(tc_ranked))
+            if defer_bench_boost:
+                bb_gw, bb_bonus = find_best_bench_boost_gw(
+                    lineups_by_t=result["solution"]["lineups"],
+                    expected_points=result["squad_points"],
+                    wildcard_gws=wildcard_gws,
+                    start_gw=current_gw, horizon=horizon,
+                    free_hit_gws=result["free_hit_gws"],
+                    triple_captain_gw=-1,
+                    candidate_gws=bb_gws,
+                    sub_probability=sub_probability,
+                )
+            else:
+                bb_gw = result["bench_boost_gw"] if result["bench_boost_gw"] != -1 else None
+                bb_bonus = 0.0
 
-        tc_candidates = tc_ranked[:tc_top_k]
-        tc_scenarios = [
-            {
-                "name": f"{result['scenario_name']} | TC GW{tc_gw}",
+            if defer_triple_captain:
+                tc_gw, tc_bonus = find_best_triple_captain_gw(
+                    captains_by_t=result["solution"]["captains"],
+                    expected_points=result["squad_points"],
+                    wildcard_gws=wildcard_gws,
+                    start_gw=current_gw, horizon=horizon,
+                    free_hit_gws=result["free_hit_gws"],
+                    bench_boost_gw=bb_gw if bb_gw is not None else -1,
+                    candidate_gws=tc_gws,
+                    sub_probability=sub_probability,
+                )
+            else:
+                tc_gw = result["triple_captain_gw"]
+                tc_gw = tc_gw if tc_gw != -1 else None
+                tc_bonus = 0.0
+
+            if bb_gw is None and tc_gw is None:
+                continue
+            ranked.append((result, bb_gw, tc_gw, bb_bonus + tc_bonus))
+
+        # Dedup identical (FH, BB, TC) allocations — different FH-only scenarios
+        # can independently land on the same BB/TC placement.
+        seen = set()
+        deduped = []
+        for item in ranked:
+            result, bb_gw, tc_gw, _ = item
+            key = (tuple(result["free_hit_gws"]), bb_gw, tc_gw)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        deduped.sort(key=lambda item: item[0]["total_points"] + item[3], reverse=True)
+        chip_top_k = solver_params.get("chip_reselect_candidates", 5)
+        logger.info("Re-solving top %d chip-placement candidate(s) (out of %d scored)...",
+                    min(chip_top_k, len(deduped)), len(deduped))
+
+        chip_candidates = deduped[:chip_top_k]
+        final_scenarios = []
+        for result, bb_gw, tc_gw, _ in chip_candidates:
+            chip_parts = [f"BB GW{bb_gw}"] if bb_gw is not None else []
+            chip_parts += [f"TC GW{tc_gw}"] if tc_gw is not None else []
+            name = " | ".join([result["scenario_name"], *chip_parts]) if chip_parts else result["scenario_name"]
+            final_scenarios.append({
+                "name": name,
                 "free_hit_gws": result["free_hit_gws"],
-                "bench_boost_gw": result["bench_boost_gw"],
-                "triple_captain_gw": tc_gw,
+                "bench_boost_gw": bb_gw if bb_gw is not None else -1,
+                "triple_captain_gw": tc_gw if tc_gw is not None else -1,
                 "force_wildcard_gw": force_wildcard_gw,
-            }
-            for result, tc_gw, _ in tc_candidates
-        ]
-        tc_results = solve_scenarios(tc_scenarios, solver_ctx, workers=workers)
+            })
+        chip_results = solve_scenarios(final_scenarios, solver_ctx, workers=workers)
 
-        for raw in tc_results:
+        for raw in chip_results:
             if raw["status"] != "solved":
                 continue
             scenario = raw["scenario"]
@@ -721,6 +776,7 @@ def main() -> None:
             )
             total_points = raw["base_points"] + fh_total
             if total_points > best_total:
+                best_total = total_points
                 best_result = {
                     "scenario_name": scenario["name"],
                     "free_hit_gws": scenario["free_hit_gws"],
@@ -730,7 +786,7 @@ def main() -> None:
                     "free_hit_benefit": fh_total,
                     "total_points": total_points,
                     "solution": raw["solution"],
-                    "captain_points": raw["captain_points"],
+                    "squad_points": raw["squad_points"],
                     "scenario": scenario,
                 }
                 best_total = total_points

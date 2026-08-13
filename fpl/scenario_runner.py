@@ -109,8 +109,8 @@ def _solve_scenario(scenario: Dict, ctx: Dict) -> Dict:
 
     Deliberately returns plain data rather than the FPLSolver: the solved PuLP
     model holds thousands of LpVariable objects and is expensive and fragile to
-    send back across a process boundary. `expected_points` is included because
-    the post-hoc Triple Captain scoring in the parent needs it.
+    send back across a process boundary. `squad_points` is included because the
+    post-hoc Bench Boost and Triple Captain scoring in the parent needs it.
     """
     solver = build_solver(scenario, ctx)
     if solver is None:
@@ -126,28 +126,32 @@ def _solve_scenario(scenario: Dict, ctx: Dict) -> Dict:
         "status": "solved",
         "solution": solution,
         "base_points": solution["objective_value"],
-        "captain_points": _captain_points(solver, solution),
+        "squad_points": _squad_points(solver, solution),
         "proven_optimal": solver.proven_optimal,
     }
 
 
-def _captain_points(solver: FPLSolver, solution: Dict) -> Dict:
+def _squad_points(solver: FPLSolver, solution: Dict) -> Dict:
     """
     The only slice of `expected_points` that survives this scenario.
 
-    find_best_triple_captain_gw reads exactly one entry per GW —
-    `(captains_by_t[t], gw)` — so returning the full dict would ship (and then
-    retain, for every scenario, until the request ends) roughly `players x GWs`
-    entries to serve at most `horizon` lookups. At 581 players over a 10-GW
-    horizon that is ~5.8k entries per scenario against ~10 that are read; with
-    100+ scenarios resident the difference is the kind of thing that OOMs a 2Gi
-    container. Keyed `(player, gw)` to match what that function expects.
+    find_best_triple_captain_gw and find_best_bench_boost_gw read entries for
+    whichever players are actually in the squad (starters + bench) at each GW
+    — so returning the full dict would ship (and then retain, for every
+    scenario, until the request ends) roughly `players x GWs` entries to serve
+    at most `15 x horizon` lookups. At 581 players over a 10-GW horizon that is
+    ~5.8k entries per scenario against ~150 that are read; with 100+ scenarios
+    resident the difference is the kind of thing that OOMs a 2Gi container
+    (see 0437e12, which this narrowing supersedes — it used to be captain-only,
+    widened to the full squad once Bench Boost started needing bench players'
+    points too). Keyed `(player, gw)` to match what both functions expect.
     """
-    return {
-        (captain, solver.start_gw + t - 1):
-            solver.expected_points.get((captain, solver.start_gw + t - 1), 0.0)
-        for t, captain in solution["captains"].items()
-    }
+    points: Dict = {}
+    for t, lineup in solution["lineups"].items():
+        gw = solver.start_gw + t - 1
+        for p in lineup.get("starters", []) + lineup.get("bench", []):
+            points[(p, gw)] = solver.expected_points.get((p, gw), 0.0)
+    return points
 
 
 def _init_worker(ctx: Dict) -> None:

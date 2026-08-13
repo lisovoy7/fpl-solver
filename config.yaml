@@ -82,13 +82,16 @@ solver:
   # Maximum chip scenarios to test (caps combinatorial explosion).
   max_scenarios: 1000
 
-  # Triple Captain is scored post-hoc instead of multiplying into the FH x BB
-  # scenario count (it only ever bonuses the plan's own best captain GW — see
+  # Bench Boost and Triple Captain are both scored post-hoc instead of being
+  # multiplied into the FH scenario count — each only ever changes which GW
+  # gets its bonus applied to an otherwise-unchanged plan (Triple Captain
+  # exactly; Bench Boost approximately — see find_best_bench_boost_gw and
   # find_best_triple_captain_gw in fpl/free_hit.py). This caps how many of the
-  # top-scored (plan, TC GW) candidates get re-solved as full MILPs to confirm
-  # the true objective. Higher = more thorough, slower. Ignored when TC is
-  # forced via force_triple_captain_gw, or already fully used.
-  triple_captain_candidates: 5
+  # top-scored (FH plan, BB GW, TC GW) candidates get re-solved as full MILPs
+  # to confirm the true objective. Higher = more thorough, slower. Skipped
+  # per-chip when that chip is forced (force_bench_boost_gw /
+  # force_triple_captain_gw) or already fully used.
+  chip_reselect_candidates: 5
 
 # ---------- Chip usage state ----------
 # Auto-detected from FPL API if omitted. Override here if detection is wrong.

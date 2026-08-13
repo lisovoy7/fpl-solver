@@ -113,6 +113,7 @@ Control how the MILP optimization behaves. All have sensible defaults.
 | `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. CBC rarely proves optimality within it, so this caps solution *quality*, not just runtime — raising it is cheap now that scenarios solve in parallel |
 | `solver.mip_gap` | float | `null` | Stop a scenario once CBC is within this relative gap of the best possible objective (`0.005` = 0.5%). `null` solves until the time limit |
 | `solver.max_scenarios` | int | `100` | Cap on total chip scenarios to evaluate. Prevents combinatorial explosion when many chips are unused and the horizon is long |
+| `solver.chip_reselect_candidates` | int | `5` | Bench Boost and Triple Captain are scored post-hoc against an FH-only solve rather than enumerated into the scenario count (see `find_best_bench_boost_gw` / `find_best_triple_captain_gw` in `fpl/free_hit.py`). This caps how many of the top-scored (FH plan, BB GW, TC GW) candidates get re-solved as full MILPs to confirm the real objective. Higher = more thorough, slower |
 
 ### Chip Usage State
 

@@ -34,7 +34,7 @@ _DEFAULT_SOLVER = {
     "first_gw_transfer_penalty": -1,
     "time_limit_per_scenario": 15,
     "max_scenarios": 100,
-    "triple_captain_candidates": 5,
+    "chip_reselect_candidates": 5,
 }
 
 _DEFAULT_TRANSFER_TOPUP = {

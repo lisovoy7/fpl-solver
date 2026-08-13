@@ -344,7 +344,7 @@ $$
 
 #### Bench Boost and Triple Captain
 
-These are handled **outside** the main MILP via **scenario enumeration** (see below). For each scenario, the specific BB/TC GW is passed to the solver as a fixed parameter, and additional objective terms are added for that GW.
+Both are handled **outside** the main MILP, as a fixed parameter passed to the solver that adds objective terms for that GW — but *which* GW gets chosen normally comes from post-hoc scoring against an already-solved plan, not scenario enumeration (see "Chip Scenario Enumeration" below). Enumeration only happens when a chip is forced to a specific GW via config, or already fully used (both collapse to a single fixed option anyway).
 
 #### Free Hit
 
@@ -376,22 +376,37 @@ This is solved once per FH GW in the planning horizon, and the resulting points 
 
 **Module:** `fpl/free_hit.py` — `generate_chip_scenarios()`
 
-Since chip decisions (when to play FH, BB, TC) are discrete choices that interact multiplicatively with the continuous optimization, they are decomposed into **scenarios**. Each scenario specifies:
+Free Hit is a discrete choice that interacts multiplicatively with the continuous optimization (it effectively picks a different squad for one GW), so it is decomposed into **scenarios** the same way the whole chip decision used to be. Each scenario specifies:
 - Which GWs to use Free Hit (0, 1, or 2 — one per half-season)
 - Which GW to use Bench Boost (-1 = none, or a specific GW)
 - Which GW to use Triple Captain (-1 = none, or a specific GW)
 
 **Generation logic:**
 1. FH scenarios: enumerate all valid single/double FH placements, respecting the 1-per-half rule.
-2. BB options: -1 plus every GW in the horizon where BB is still available (per half).
-3. TC options: same as BB.
+2. BB options: normally just `[-1]` (deferred — see below); enumerated per-half-available GWs only when `force_bench_boost_gw` is set or BB is already fully used, in which case there's only one legal option anyway.
+3. TC options: same rule, mirrored for `force_triple_captain_gw`.
 4. Cartesian product of FH × BB × TC, filtered by the **1-chip-per-GW conflict rule** (no two chips on the same GW).
+
+In the common case (both chips available, neither forced) this cartesian product collapses to just the FH options — BB and TC are placed afterwards, not enumerated here.
 
 Each scenario is solved independently by the main MILP solver. The scenario with the highest total expected points (solver objective + FH benefits) wins.
 
-**Forced chip GWs:** When `force_free_hit_gw`, `force_bench_boost_gw`, `force_triple_captain_gw`, or `force_wildcard_gw` is set in config, that chip is pinned to the specified GW and no other options are enumerated for it. This dramatically reduces the scenario count (e.g. from ~90 to ~9 when FH is pinned and TC is exhausted). For Wildcard, the solver adds a hard constraint forcing the wildcard decision variable to 1 on the specified GW and 0 elsewhere.
+**Forced chip GWs:** When `force_free_hit_gw`, `force_bench_boost_gw`, `force_triple_captain_gw`, or `force_wildcard_gw` is set in config, that chip is pinned to the specified GW and no other options are enumerated for it. For Wildcard, the solver adds a hard constraint forcing the wildcard decision variable to 1 on the specified GW and 0 elsewhere.
 
-**Complexity control:** The `max_scenarios` config param (default: 100) caps the number of scenarios tested. For a 9-GW horizon with all chips available, this typically produces 50-90 scenarios.
+**Complexity control:** The `max_scenarios` config param (default: 100) caps the number of scenarios tested — mostly a backstop now that BB/TC deferral keeps the FH-only scenario count small (roughly linear in horizon, not quadratic) in the common case.
+
+### Post-Hoc Bench Boost / Triple Captain Placement
+
+**Module:** `fpl/free_hit.py` — `find_best_bench_boost_gw()`, `find_best_triple_captain_gw()`
+
+Once the FH-only scenarios above are solved, each chip is scored against every solved plan **without re-solving**, then only the top-scored `(FH plan, BB GW, TC GW)` combinations — deduplicated, `chip_reselect_candidates` of them (default 5) — get a full MILP re-solve with both chips fixed, to confirm the true objective. Whichever of those re-solves scores best wins.
+
+The two chips are not equally exact:
+
+- **Triple Captain** only ever adds `lineup_weight × E_pt[captain]` on top of an otherwise-unaffected plan (`create_objective`'s TC term is additive and uniform across players, so TC can't change who's captained). The best legal GW for an already-solved plan is exactly its own highest-scoring legal captain GW — no re-solve needed to find it; the re-solve stage exists to confirm the number, not to search for a better placement.
+- **Bench Boost** raises *every* squad member (starters via `lineup_complement`, bench via `bench_complement`) to full weight on its GW — it changes the objective's valuation of the squad the model already picked, rather than adding a fixed bonus. A solve that knew BB was coming could legitimately pick a different bench or different transfers to exploit that GW harder. `find_best_bench_boost_gw()` scores what the *already-chosen* lineup would gain, which is a real approximation of the jointly-optimal choice, not an exact shortcut to it — the re-solve stage is what catches cases where this estimate misleads, not just confirms it.
+
+BB is picked first (excluding FH/wildcard GWs) and excluded from TC's candidate GWs afterwards, rather than jointly optimizing the pair — cheap either way, but scoring every `(BB GW, TC GW)` combination together buys little given both get a full re-solve regardless.
 
 ---
 
@@ -421,7 +436,7 @@ The full pipeline executed by `python run.py`:
 | Prediction generation | 5-10 seconds |
 | Free Hit pre-calculation | 5-10 seconds |
 | Each MILP scenario solve | up to `time_limit_per_scenario` |
-| Total (rest-of-season, ~90 scenarios, 8 workers) | 3-6 minutes |
+| Total (10-GW horizon, all chips available, 3 workers) | ~1.5 minutes — 11 FH-only scenarios (BB/TC deferred, not enumerated) plus up to `chip_reselect_candidates` re-solves. Measured trade-off vs. full FH×BB enumeration: ~0.5% fewer points (637.4 → 634.0) for a ~5.8x speedup (517s → 89s) |
 
 The solver uses the **CBC** (Coin-or Branch and Cut) solver, which is open-source and bundled with PuLP. No external solver installation required. For faster solves, GUROBI can be used by changing `solver_name` (requires a separate license).
 
