@@ -169,6 +169,73 @@ def generate_chip_scenarios(
     return scenarios
 
 
+def triple_captain_candidate_gws(
+    start_gw: int,
+    planning_horizon: int,
+    used_first_half: int = 0,
+    used_second_half: int = 0,
+) -> List[int]:
+    """GWs where Triple Captain could still legally be placed, respecting the 1-per-half rule."""
+    all_gws = list(range(start_gw, start_gw + planning_horizon))
+    first_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["first_half"][0] <= gw <= CHIP_WINDOWS["first_half"][1]
+    ]
+    second_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
+    ]
+    return _half_season_chip_options(used_first_half, used_second_half, first_half_gws, second_half_gws)
+
+
+def find_best_triple_captain_gw(
+    captains_by_t: Dict[int, int],
+    expected_points: Dict[Tuple[int, int], float],
+    wildcard_gws: List[int],
+    start_gw: int,
+    horizon: int,
+    free_hit_gws: List[int],
+    bench_boost_gw: int,
+    candidate_gws: List[int],
+    sub_probability: float,
+) -> Tuple[Optional[int], float]:
+    """
+    Heuristically score the best legal Triple Captain GW for an already-solved
+    FH x BB plan, without re-solving.
+
+    Triple Captain's only effect on the objective (see solver.py's
+    create_objective) is an extra `lineup_weight * E_pt[captain]` bonus on one
+    GW. The multiplier is uniform across players, so TC never changes who gets
+    captained — it just picks which GW to apply the bonus to. That means the
+    best legal GW for a given plan is simply its own highest-scoring legal
+    captain GW; no re-solve is needed to find it.
+
+    `candidate_gws` should already reflect per-half TC availability (0/1/2
+    used) via triple_captain_candidate_gws(). FH/BB/wildcard GWs are excluded
+    here since the solver enforces at most one chip per GW.
+
+    Returns:
+        (best_gw, bonus) — best_gw is None if no legal GW remains.
+    """
+    lineup_weight = 1.0 - sub_probability
+    excluded = set(free_hit_gws) | {bench_boost_gw} | set(wildcard_gws)
+    best_gw: Optional[int] = None
+    best_bonus = 0.0
+    for gw in candidate_gws:
+        if gw in excluded:
+            continue
+        t = gw - start_gw + 1
+        if not (1 <= t <= horizon):
+            continue
+        captain = captains_by_t.get(t)
+        if captain is None:
+            continue
+        bonus = lineup_weight * expected_points.get((captain, gw), 0.0)
+        if bonus > best_bonus:
+            best_gw, best_bonus = gw, bonus
+    return best_gw, best_bonus
+
+
 # -----------------------------------------------------------------------------
 # Part 2: Free Hit Squad Calculator
 # -----------------------------------------------------------------------------

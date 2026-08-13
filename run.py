@@ -24,7 +24,10 @@ import pandas as pd
 from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
-from fpl.free_hit import generate_chip_scenarios, calculate_free_hit_benefits_for_horizon
+from fpl.free_hit import (
+    generate_chip_scenarios, calculate_free_hit_benefits_for_horizon,
+    triple_captain_candidate_gws, find_best_triple_captain_gw,
+)
 from fpl.watchlist import create_watchlist
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -525,6 +528,21 @@ def main() -> None:
     if args.force_bench_boost_gw is not None:
         force_bench_boost_gw = args.force_bench_boost_gw
 
+    triple_captain_used_first_half = min(triple_captain_used, 1)
+    triple_captain_used_second_half = max(0, triple_captain_used - 1)
+
+    # Triple Captain only ever adds a fixed bonus on the plan's own best
+    # captain GW — it can't change who's captained, since the multiplier is
+    # uniform across players (see find_best_triple_captain_gw). So instead of
+    # multiplying it into the FH x BB scenario count, solve FH x BB with TC
+    # off, then score+place TC post-hoc. Skipped when TC is forced (already
+    # pinned) or fully spent (nothing left to place).
+    defer_triple_captain = (
+        not args.no_chips
+        and force_triple_captain_gw is None
+        and (triple_captain_used_first_half < 1 or triple_captain_used_second_half < 1)
+    )
+
     if args.no_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [],
                            "bench_boost_gw": -1, "triple_captain_gw": -1,
@@ -537,8 +555,8 @@ def main() -> None:
             free_hits_used_second_half=max(0, free_hits_used - 1),
             bench_boost_used_first_half=min(bench_boost_used, 1),
             bench_boost_used_second_half=max(0, bench_boost_used - 1),
-            triple_captain_used_first_half=min(triple_captain_used, 1),
-            triple_captain_used_second_half=max(0, triple_captain_used - 1),
+            triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
+            triple_captain_used_second_half=1 if defer_triple_captain else triple_captain_used_second_half,
             force_free_hit_gw=force_free_hit_gw,
             force_bench_boost_gw=force_bench_boost_gw,
             force_triple_captain_gw=force_triple_captain_gw,
@@ -647,6 +665,99 @@ def main() -> None:
         marker = " ★ BEST" if is_new_best else ""
         logger.info("[%d/%d] %-40s  %.1f pts%s",
                     idx, total_scenarios, scenario["name"], total_points, marker)
+
+    # Score every solved FH x BB plan's best legal Triple Captain GW, then
+    # re-solve only the top candidates as full MILPs (TC's placement can shift
+    # the wildcard GW the solver picks, so the heuristic score alone isn't
+    # trustworthy enough to skip the re-solve).
+    if defer_triple_captain and scenario_results:
+        tc_gws = triple_captain_candidate_gws(
+            start_gw=current_gw, planning_horizon=horizon,
+            used_first_half=triple_captain_used_first_half,
+            used_second_half=triple_captain_used_second_half,
+        )
+        tc_ranked = []
+        for result in scenario_results:
+            wildcard_gws = [
+                current_gw + t - 1
+                for t, tr in result["solution"]["transfers"].items()
+                if tr.get("wildcard_active")
+            ]
+            tc_gw, tc_bonus = find_best_triple_captain_gw(
+                captains_by_t=result["solution"]["captains"],
+                expected_points=result["solver"].expected_points,
+                wildcard_gws=wildcard_gws,
+                start_gw=current_gw, horizon=horizon,
+                free_hit_gws=result["free_hit_gws"],
+                bench_boost_gw=result["bench_boost_gw"],
+                candidate_gws=tc_gws,
+                sub_probability=sub_probability,
+            )
+            if tc_gw is not None:
+                tc_ranked.append((result, tc_gw, tc_bonus))
+
+        tc_ranked.sort(key=lambda item: item[0]["total_points"] + item[2], reverse=True)
+        tc_top_k = solver_params.get("triple_captain_candidates", 5)
+        logger.info("Re-solving top %d Triple Captain candidate(s) (out of %d scored)...",
+                    min(tc_top_k, len(tc_ranked)), len(tc_ranked))
+
+        for result, tc_gw, _tc_bonus in tc_ranked[:tc_top_k]:
+            tc_scenario_name = f"{result['scenario_name']} | TC GW{tc_gw}"
+            solver = FPLSolver(
+                planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
+                afcon_enabled=transfer_topup.get("enabled", True),
+                afcon_trigger_gw=transfer_topup.get("trigger_gw", 15),
+                afcon_transfer_count=transfer_topup.get("transfer_count", 5),
+                points_multiplier_override=overrides.get("points_multiplier"),
+                forced_lineup_players=overrides.get("forced_lineup"),
+                non_playing_players=overrides.get("non_playing"),
+                first_gw_transfer_penalty=first_gw_penalty,
+                sub_probability=sub_probability,
+                bench_boost_gw=result["bench_boost_gw"],
+                triple_captain_gw=tc_gw,
+                free_hit_gws=result["free_hit_gws"],
+                force_wildcard_gw=force_wildcard_gw,
+            )
+            solver.load_predictions(predictions)
+            if len(solver.predictions) == 0:
+                continue
+            solver.load_player_data(gw_data, predictions, player_subset=watchlist)
+            solver.set_initial_squad(current_squad, available_transfers=free_transfers)
+            solver.set_chip_state(
+                wildcard_first_half=min(wildcards_used, 1),
+                wildcard_second_half=max(0, wildcards_used - 1),
+            )
+            solver.build_model()
+            if not solver.solve(time_limit=time_limit):
+                logger.info("  %-40s  INFEASIBLE", tc_scenario_name)
+                continue
+
+            solution = solver.extract_solution()
+            base_points = solution["objective_value"]
+            fh_total = sum(
+                fh_benefits.get(gw, {}).get("total_points", 0)
+                for gw in result["free_hit_gws"]
+            )
+            total_points = base_points + fh_total
+
+            is_new_best = total_points > best_total
+            if is_new_best:
+                best_result = {
+                    "scenario_name": tc_scenario_name,
+                    "free_hit_gws": result["free_hit_gws"],
+                    "bench_boost_gw": result["bench_boost_gw"],
+                    "triple_captain_gw": tc_gw,
+                    "base_points": base_points,
+                    "free_hit_benefit": fh_total,
+                    "total_points": total_points,
+                    "solution": solution,
+                    "solver": solver,
+                    "players": solver.players,
+                }
+                best_total = total_points
+
+            marker = " ★ BEST" if is_new_best else ""
+            logger.info("  %-40s  %.1f pts%s", tc_scenario_name, total_points, marker)
 
     elapsed = time.time() - start_time
     logger.info("Done: %d/%d solved, %d failed in %.0fs",
