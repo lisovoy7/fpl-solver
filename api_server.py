@@ -41,6 +41,7 @@ from fpl.free_hit import (
     triple_captain_candidate_gws, find_best_triple_captain_gw,
 )
 from fpl.watchlist import create_watchlist
+from fpl.scenario_runner import build_solver, solve_scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -534,55 +535,53 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     best_total = -float("inf")
     scenario_results = []
 
-    for idx, scenario in enumerate(chip_scenarios, 1):
-        solver = FPLSolver(
-            planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
-            points_multiplier_override=None,
-            forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
-            non_playing_players=non_playing_tuples,
-            first_gw_transfer_penalty=-1,
-            sub_probability=0.10,
-            bench_boost_gw=scenario["bench_boost_gw"],
-            triple_captain_gw=scenario["triple_captain_gw"],
-            free_hit_gws=scenario["free_hit_gws"],
-            force_wildcard_gw=scenario.get("force_wildcard_gw"),
-        )
-        solver.load_predictions(predictions)
-        if len(solver.predictions) == 0:
-            continue
-        solver.load_player_data(gw_data, predictions, player_subset=watchlist)
-        solver.set_initial_squad(current_squad, available_transfers=req.free_transfers)
-        solver.set_chip_state(
-            wildcard_first_half=min(wildcards_used, 1),
-            wildcard_second_half=max(0, wildcards_used - 1),
-        )
-        solver.build_model()
-        if not solver.solve(time_limit=req.time_limit_per_scenario):
-            continue
+    # Everything a worker process needs to rebuild a solver on its own side.
+    solver_ctx = {
+        "horizon": horizon,
+        "budget": total_budget,
+        "start_gw": current_gw,
+        "afcon_enabled": True,
+        "afcon_trigger_gw": 15,
+        "afcon_transfer_count": 5,
+        "points_multiplier": None,
+        "forced_lineup": forced_lineup_tuples if req.forced_lineup else None,
+        "non_playing": non_playing_tuples,
+        "first_gw_penalty": -1,
+        "sub_probability": 0.10,
+        "predictions": predictions,
+        "gw_data": gw_data,
+        "watchlist": watchlist,
+        "current_squad": current_squad,
+        "free_transfers": req.free_transfers,
+        "wildcard_first_half": min(wildcards_used, 1),
+        "wildcard_second_half": max(0, wildcards_used - 1),
+        "time_limit": req.time_limit_per_scenario,
+        "mip_gap": None,
+    }
 
-        solution = solver.extract_solution()
-        base_points = solution["objective_value"]
+    raw_results = solve_scenarios(chip_scenarios, solver_ctx)
+
+    for raw in raw_results:
+        if raw["status"] != "solved":
+            continue
+        scenario = raw["scenario"]
         fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
-        total_points = base_points + fh_total
+        total_points = raw["base_points"] + fh_total
 
-        # `.prob` is the built PuLP model (every decision variable + constraint) — only
-        # needed inside solve()/extract_solution(), never read again. Every scenario's
-        # solver stays alive for the rest of the request (find_best_triple_captain_gw
-        # below needs .expected_points from all of them), so leaving .prob attached
-        # means N full MILP models resident in memory at once. Dropping it here is what
-        # keeps a long chip-scenario run from OOMing partway through.
-        solver.prob = None
-
+        # The built PuLP model (every decision variable + constraint) used to stay
+        # resident here once per scenario and OOM'd long runs — see 0437e12, which
+        # fixed that by dropping .prob after extract_solution(). That patch is
+        # unnecessary now: solving happens in worker processes that return plain
+        # data and then exit, so no MILP model ever reaches this process.
         result = {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
-                  "bench_boost_gw": scenario["bench_boost_gw"], "solution": solution,
-                  "solver": solver, "players": solver.players, "total_points": total_points}
+                  "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
+                  "captain_points": raw["captain_points"], "scenario": scenario,
+                  "total_points": total_points}
         scenario_results.append(result)
 
         if total_points > best_total:
             best_total = total_points
             best_result = result
-
-        logger.info("[%d/%d] %-30s  %.1f pts", idx, len(chip_scenarios), scenario["name"], total_points)
 
     # Score every solved FH x BB plan's best legal Triple Captain GW, then
     # re-solve only the top candidates as full MILPs — see run.py's mirror of
@@ -602,7 +601,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
             ]
             tc_gw, tc_bonus = find_best_triple_captain_gw(
                 captains_by_t=result["solution"]["captains"],
-                expected_points=result["solver"].expected_points,
+                expected_points=result["captain_points"],
                 wildcard_gws=wildcard_gws,
                 start_gw=current_gw, horizon=horizon,
                 free_hit_gws=result["free_hit_gws"],
@@ -615,53 +614,40 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
 
         tc_ranked.sort(key=lambda item: item[0]["total_points"] + item[2], reverse=True)
 
-        for result, tc_gw, _tc_bonus in tc_ranked[:TC_RESELECT_TOP_K]:
-            tc_scenario_name = f"{result['scenario_name']} | TC GW{tc_gw}"
-            solver = FPLSolver(
-                planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
-                points_multiplier_override=None,
-                forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
-                non_playing_players=non_playing_tuples,
-                first_gw_transfer_penalty=-1,
-                sub_probability=0.10,
-                bench_boost_gw=result["bench_boost_gw"],
-                triple_captain_gw=tc_gw,
-                free_hit_gws=result["free_hit_gws"],
-                force_wildcard_gw=req.force_wildcard_gw,
-            )
-            solver.load_predictions(predictions)
-            if len(solver.predictions) == 0:
+        tc_scenarios = [
+            {
+                "name": f"{result['scenario_name']} | TC GW{tc_gw}",
+                "free_hit_gws": result["free_hit_gws"],
+                "bench_boost_gw": result["bench_boost_gw"],
+                "triple_captain_gw": tc_gw,
+                "force_wildcard_gw": req.force_wildcard_gw,
+            }
+            for result, tc_gw, _ in tc_ranked[:TC_RESELECT_TOP_K]
+        ]
+        for raw in solve_scenarios(tc_scenarios, solver_ctx):
+            if raw["status"] != "solved":
                 continue
-            solver.load_player_data(gw_data, predictions, player_subset=watchlist)
-            solver.set_initial_squad(current_squad, available_transfers=req.free_transfers)
-            solver.set_chip_state(
-                wildcard_first_half=min(wildcards_used, 1),
-                wildcard_second_half=max(0, wildcards_used - 1),
-            )
-            solver.build_model()
-            if not solver.solve(time_limit=req.time_limit_per_scenario):
-                continue
-
-            solution = solver.extract_solution()
-            base_points = solution["objective_value"]
-            fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in result["free_hit_gws"])
-            total_points = base_points + fh_total
-            solver.prob = None  # see comment on the first scenario loop above
+            scenario = raw["scenario"]
+            fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
+            total_points = raw["base_points"] + fh_total
 
             if total_points > best_total:
                 best_total = total_points
-                best_result = {"scenario_name": tc_scenario_name, "free_hit_gws": result["free_hit_gws"],
-                               "bench_boost_gw": result["bench_boost_gw"], "solution": solution,
-                               "solver": solver, "players": solver.players, "total_points": total_points}
-
-            logger.info("  %-30s  %.1f pts", tc_scenario_name, total_points)
+                best_result = {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
+                               "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
+                               "captain_points": raw["captain_points"], "scenario": scenario,
+                               "total_points": total_points}
 
     if not best_result:
         raise ValueError("No feasible solution found")
 
+    # Workers return plain data, not solver objects; rebuild the winner's solver
+    # (~0.2s, no solve) for the fields _format_solution reads.
+    best_solver = build_solver(best_result["scenario"], solver_ctx)
+
     result = _format_solution(
-        best_result["solution"], best_result["solver"],
-        best_result["players"], current_gw, best_total,
+        best_result["solution"], best_solver,
+        best_solver.players, current_gw, best_total,
         best_result["scenario_name"], fh_benefits, bootstrap,
     )
     result["elapsed_seconds"] = round(time.time() - start_time, 1)

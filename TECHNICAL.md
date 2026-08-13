@@ -410,7 +410,7 @@ The full pipeline executed by `python run.py`:
 7. **Build watchlist** — filter players by `min_hist_pct` within the last `max_hist_window` GWs (window shrinks early-season), apply `must_include`/`must_exclude`.
 8. **Enumerate chip scenarios** — generate all valid chip combinations.
 9. **Pre-calculate Free Hit benefits** — solve the FH sub-problem for every GW in the horizon.
-10. **Solve each scenario** — for each chip scenario, create and solve the main MILP. Track the best solution.
+10. **Solve each scenario** — scenarios are independent MILPs and are solved in parallel worker processes (`fpl/scenario_runner.py`). The best solution wins.
 11. **Output** — display the optimal strategy (transfers, lineup, captain, chips per GW) on the console and save to `output/strategy_gw{N}.json`.
 
 ### Runtime Characteristics
@@ -420,8 +420,50 @@ The full pipeline executed by `python run.py`:
 | API data fetch (GW data) | 2-3 minutes |
 | Prediction generation | 5-10 seconds |
 | Free Hit pre-calculation | 5-10 seconds |
-| Each MILP scenario solve | 5-15 seconds |
-| Total (9-GW horizon, ~90 scenarios) | 15-25 minutes |
-| Total (rest-of-season, ~90 scenarios) | 20-40 minutes |
+| Each MILP scenario solve | up to `time_limit_per_scenario` |
+| Total (rest-of-season, ~90 scenarios, 8 workers) | 3-6 minutes |
 
 The solver uses the **CBC** (Coin-or Branch and Cut) solver, which is open-source and bundled with PuLP. No external solver installation required. For faster solves, GUROBI can be used by changing `solver_name` (requires a separate license).
+
+### Scenario Parallelism
+
+**Module:** `fpl/scenario_runner.py`
+
+Building a scenario's model costs ~0.2s; CBC's branch-and-bound is effectively all
+of the remaining runtime. Since scenarios share no state, they are dispatched to a
+`ProcessPoolExecutor` — one CBC thread per worker, because spending cores on
+scenarios beats spending them on a single scenario's search tree and the two
+compete for the same CPUs.
+
+Measured on a 10-core machine, 20 scenarios at a 6-GW horizon:
+
+| Configuration | Wall clock | Solution quality |
+|---|---|---|
+| Sequential, 15s limit | 189s | baseline |
+| 8 workers, 15s limit | 34s (5.5x) | marginally worse on 6/20 scenarios |
+| 8 workers, 60s limit | 41s (4.6x) | better on 2/20, worse on none |
+
+The middle row is the trap: `time_limit` is wall-clock inside CBC, so under load
+each scenario gets slightly less search. The fix is to spend part of the speedup
+on a longer limit — the bottom row is faster *and* strictly better than the
+sequential baseline.
+
+Worker count comes from `--workers`, else `FPL_SOLVER_WORKERS`, else CPU count - 1.
+`--workers 1` runs in-process, which is what you want when debugging a solve.
+
+**Results are order-preserved, not completion-ordered**, so the chosen best
+scenario is reproducible across runs.
+
+### Time Limits and "Optimal"
+
+CBC reports `LpStatus == Optimal` both for a proven optimum and for a feasible
+incumbent it was still improving when the time limit fired; only `prob.sol_status`
+distinguishes them. `FPLSolver.solve()` records this as `self.proven_optimal`, and
+the scenario runner tags time-limited results in its progress output.
+
+This matters for interpreting results: at a 6-GW horizon a single scenario needed
+~400s to prove optimality, and the default 15s limit landed ~4% below that
+objective. Scenarios are therefore ranked partly on how much search each happened
+to get. Raising `time_limit_per_scenario` (cheap now that scenarios run in
+parallel) narrows that spread; `solver.mip_gap` sets a relative gap to stop at
+instead.

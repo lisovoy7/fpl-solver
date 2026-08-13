@@ -107,6 +107,7 @@ class FPLSolver:
         self.initial_transfers = 1
         self.prob = None
         self.variables = {}
+        self.proven_optimal = False
 
         logger.debug("Initialized FPL solver with %d GW horizon", planning_horizon)
 
@@ -912,34 +913,61 @@ class FPLSolver:
         logger.debug("MILP model built: %d vars, %d constraints",
                      len(self.prob.variables()), len(self.prob.constraints))
 
-    def solve(self, time_limit: Optional[int] = None) -> bool:
+    def solve(
+        self,
+        time_limit: Optional[int] = None,
+        threads: Optional[int] = None,
+        mip_gap: Optional[float] = None,
+    ) -> bool:
         """
         Solve the MILP model.
 
         Args:
             time_limit: Maximum solving time in seconds.
+            threads: CBC worker threads. None leaves CBC's default (1). Only set
+                this when scenarios are solved one at a time — when scenarios run
+                in parallel processes, threads must stay 1 or the processes
+                oversubscribe the CPU and every solve gets slower.
+            mip_gap: Relative optimality gap to stop at (e.g. 0.005 = 0.5%).
+                None solves to proven optimality or the time limit.
 
         Returns:
-            True if optimal solution found, False otherwise.
+            True if a usable solution was found, False otherwise.
+
+        Note:
+            True does not mean "proven optimal". CBC reports LpStatusOptimal both
+            for a proven optimum and for a feasible incumbent it was still
+            improving when the time limit fired; the two are only distinguishable
+            via `prob.sol_status`. `self.proven_optimal` records which one it was.
         """
         logger.debug("Solving MILP with %s", self.solver_name)
 
         if self.prob is None:
             raise ValueError("Model must be built before solving")
 
-        if self.solver_name.upper() == 'CBC':
-            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
-        elif self.solver_name.upper() == 'GUROBI':
+        options = [f"ratio {mip_gap}"] if mip_gap is not None else []
+        kwargs = {'msg': 0, 'timeLimit': time_limit}
+        if threads is not None:
+            kwargs['threads'] = threads
+
+        if self.solver_name.upper() == 'GUROBI':
             solver = pulp.GUROBI_CMD(msg=0, timeLimit=time_limit)
         else:
-            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
+            solver = pulp.PULP_CBC_CMD(options=options, **kwargs)
 
         self.prob.solve(solver)
         status = pulp.LpStatus[self.prob.status]
-        logger.debug("Solver status: %s", status)
+        self.proven_optimal = self.prob.sol_status == pulp.LpSolutionOptimal
+        logger.debug("Solver status: %s (proven optimal: %s)", status, self.proven_optimal)
 
         if self.prob.status == pulp.LpStatusOptimal:
-            logger.debug("Optimal objective value: %.2f", pulp.value(self.prob.objective))
+            if not self.proven_optimal:
+                logger.debug(
+                    "Time limit reached — returning best incumbent (%.2f), search was not complete",
+                    pulp.value(self.prob.objective),
+                )
+            else:
+                logger.debug("Optimal objective value: %.2f", pulp.value(self.prob.objective))
             return True
         else:
             logger.warning("No optimal solution found")
