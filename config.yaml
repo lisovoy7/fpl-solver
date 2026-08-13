@@ -69,6 +69,14 @@ solver:
   # Maximum chip scenarios to test (caps combinatorial explosion).
   max_scenarios: 1000
 
+  # Triple Captain is scored post-hoc instead of multiplying into the FH x BB
+  # scenario count (it only ever bonuses the plan's own best captain GW — see
+  # find_best_triple_captain_gw in fpl/free_hit.py). This caps how many of the
+  # top-scored (plan, TC GW) candidates get re-solved as full MILPs to confirm
+  # the true objective. Higher = more thorough, slower. Ignored when TC is
+  # forced via force_triple_captain_gw, or already fully used.
+  triple_captain_candidates: 5
+
 # ---------- Chip usage state ----------
 # Auto-detected from FPL API if omitted. Override here if detection is wrong.
 # All four chip types follow the same rule: one per half-season (GW 1-19 and
