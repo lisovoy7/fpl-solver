@@ -565,6 +565,14 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
         fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
         total_points = base_points + fh_total
 
+        # `.prob` is the built PuLP model (every decision variable + constraint) — only
+        # needed inside solve()/extract_solution(), never read again. Every scenario's
+        # solver stays alive for the rest of the request (find_best_triple_captain_gw
+        # below needs .expected_points from all of them), so leaving .prob attached
+        # means N full MILP models resident in memory at once. Dropping it here is what
+        # keeps a long chip-scenario run from OOMing partway through.
+        solver.prob = None
+
         result = {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
                   "bench_boost_gw": scenario["bench_boost_gw"], "solution": solution,
                   "solver": solver, "players": solver.players, "total_points": total_points}
@@ -638,6 +646,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
             base_points = solution["objective_value"]
             fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in result["free_hit_gws"])
             total_points = base_points + fh_total
+            solver.prob = None  # see comment on the first scenario loop above
 
             if total_points > best_total:
                 best_total = total_points
