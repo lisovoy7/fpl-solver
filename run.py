@@ -24,8 +24,13 @@ import pandas as pd
 from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
-from fpl.free_hit import generate_chip_scenarios, calculate_free_hit_benefits_for_horizon
+from fpl.free_hit import (
+    generate_chip_scenarios, calculate_free_hit_benefits_for_horizon,
+    triple_captain_candidate_gws, find_best_triple_captain_gw,
+    bench_boost_candidate_gws, find_best_bench_boost_gw,
+)
 from fpl.watchlist import create_watchlist
+from fpl.scenario_runner import build_solver, default_worker_count, solve_scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,6 +61,9 @@ def parse_args() -> argparse.Namespace:
                         help="Force bench boost on a specific GW (CLI override)")
     parser.add_argument("--time-limit", type=int, default=None,
                         help="Override solver time limit per scenario (seconds)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Scenario solver processes (default: CPU count - 1; "
+                             "1 disables parallelism)")
     return parser.parse_args()
 
 
@@ -525,6 +533,30 @@ def main() -> None:
     if args.force_bench_boost_gw is not None:
         force_bench_boost_gw = args.force_bench_boost_gw
 
+    bench_boost_used_first_half = min(bench_boost_used, 1)
+    bench_boost_used_second_half = max(0, bench_boost_used - 1)
+    triple_captain_used_first_half = min(triple_captain_used, 1)
+    triple_captain_used_second_half = max(0, triple_captain_used - 1)
+
+    # Neither chip changes anything about the plan except which GW it lands on
+    # relative to its own already-solved lineup (Triple Captain exactly — the
+    # multiplier is uniform across players, so it can't change who's
+    # captained; Bench Boost approximately — see find_best_bench_boost_gw). So
+    # instead of multiplying either into the FH x BB scenario count, solve
+    # FH-only with both off, then score+place both post-hoc. Skipped per-chip
+    # when that chip is forced (already pinned) or fully spent (nothing left
+    # to place).
+    defer_bench_boost = (
+        not args.no_chips
+        and force_bench_boost_gw is None
+        and (bench_boost_used_first_half < 1 or bench_boost_used_second_half < 1)
+    )
+    defer_triple_captain = (
+        not args.no_chips
+        and force_triple_captain_gw is None
+        and (triple_captain_used_first_half < 1 or triple_captain_used_second_half < 1)
+    )
+
     if args.no_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [],
                            "bench_boost_gw": -1, "triple_captain_gw": -1,
@@ -535,10 +567,10 @@ def main() -> None:
             planning_horizon=horizon,
             free_hits_used_first_half=min(free_hits_used, 1),
             free_hits_used_second_half=max(0, free_hits_used - 1),
-            bench_boost_used_first_half=min(bench_boost_used, 1),
-            bench_boost_used_second_half=max(0, bench_boost_used - 1),
-            triple_captain_used_first_half=min(triple_captain_used, 1),
-            triple_captain_used_second_half=max(0, triple_captain_used - 1),
+            bench_boost_used_first_half=1 if defer_bench_boost else bench_boost_used_first_half,
+            bench_boost_used_second_half=1 if defer_bench_boost else bench_boost_used_second_half,
+            triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
+            triple_captain_used_second_half=1 if defer_triple_captain else triple_captain_used_second_half,
             force_free_hit_gw=force_free_hit_gw,
             force_bench_boost_gw=force_bench_boost_gw,
             force_triple_captain_gw=force_triple_captain_gw,
@@ -564,7 +596,6 @@ def main() -> None:
         )
 
     # 7. Solve each scenario
-    transfer_topup = config.get("transfer_topup", {})
     sub_probability = solver_params.get("sub_probability", 0.10)
     first_gw_penalty = solver_params.get("first_gw_transfer_penalty", -1)
     time_limit = solver_params.get("time_limit_per_scenario", 15)
@@ -572,81 +603,189 @@ def main() -> None:
         time_limit = args.time_limit
 
     total_scenarios = len(chip_scenarios)
-    logger.info("Solving %d chip scenarios (time limit: %ds per scenario)...", total_scenarios, time_limit)
     start_time = time.time()
+
+    # Everything a worker process needs to rebuild a solver on its own side.
+    # The prediction/price frames travel once per worker, not once per scenario.
+    solver_ctx = {
+        "horizon": horizon,
+        "budget": total_budget,
+        "start_gw": current_gw,
+        "points_multiplier": overrides.get("points_multiplier"),
+        "forced_lineup": overrides.get("forced_lineup"),
+        "non_playing": overrides.get("non_playing"),
+        "first_gw_penalty": first_gw_penalty,
+        "sub_probability": sub_probability,
+        "predictions": predictions,
+        "gw_data": gw_data,
+        "watchlist": watchlist,
+        "current_squad": current_squad,
+        "free_transfers": free_transfers,
+        "wildcard_first_half": min(wildcards_used, 1),
+        "wildcard_second_half": max(0, wildcards_used - 1),
+        "time_limit": time_limit,
+        "mip_gap": solver_params.get("mip_gap"),
+    }
+
+    workers = args.workers if args.workers is not None else default_worker_count()
+    raw_results = solve_scenarios(chip_scenarios, solver_ctx, workers=workers)
+
     best_result = None
     best_total = -float("inf")
     scenario_results = []
     failed_count = 0
 
-    for idx, scenario in enumerate(chip_scenarios, 1):
-        solver = FPLSolver(
-            planning_horizon=horizon, budget=total_budget, start_gw=current_gw,
-            afcon_enabled=transfer_topup.get("enabled", True),
-            afcon_trigger_gw=transfer_topup.get("trigger_gw", 15),
-            afcon_transfer_count=transfer_topup.get("transfer_count", 5),
-            points_multiplier_override=overrides.get("points_multiplier"),
-            forced_lineup_players=overrides.get("forced_lineup"),
-            non_playing_players=overrides.get("non_playing"),
-            first_gw_transfer_penalty=first_gw_penalty,
-            sub_probability=sub_probability,
-            bench_boost_gw=scenario["bench_boost_gw"],
-            triple_captain_gw=scenario["triple_captain_gw"],
-            free_hit_gws=scenario["free_hit_gws"],
-            force_wildcard_gw=scenario.get("force_wildcard_gw"),
-        )
-
-        solver.load_predictions(predictions)
-        if len(solver.predictions) == 0:
-            logger.warning("[%d/%d] No predictions — skipped", idx, total_scenarios)
+    for raw in raw_results:
+        scenario = raw["scenario"]
+        if raw["status"] != "solved":
             failed_count += 1
             continue
-
-        solver.load_player_data(gw_data, predictions, player_subset=watchlist)
-        solver.set_initial_squad(current_squad, available_transfers=free_transfers)
-        solver.set_chip_state(
-            wildcard_first_half=min(wildcards_used, 1),
-            wildcard_second_half=max(0, wildcards_used - 1),
-        )
-
-        solver.build_model()
-        success = solver.solve(time_limit=time_limit)
-        if not success:
-            failed_count += 1
-            logger.info("[%d/%d] %-40s  INFEASIBLE", idx, total_scenarios, scenario["name"])
-            continue
-
-        solution = solver.extract_solution()
-        base_points = solution["objective_value"]
 
         fh_total = sum(
             fh_benefits.get(gw, {}).get("total_points", 0)
             for gw in scenario["free_hit_gws"]
         )
-        total_points = base_points + fh_total
+        total_points = raw["base_points"] + fh_total
 
         result = {
             "scenario_name": scenario["name"],
             "free_hit_gws": scenario["free_hit_gws"],
             "bench_boost_gw": scenario["bench_boost_gw"],
             "triple_captain_gw": scenario["triple_captain_gw"],
-            "base_points": base_points,
+            "base_points": raw["base_points"],
             "free_hit_benefit": fh_total,
             "total_points": total_points,
-            "solution": solution,
-            "solver": solver,
-            "players": solver.players,
+            "solution": raw["solution"],
+            "squad_points": raw["squad_points"],
+            "scenario": scenario,
         }
         scenario_results.append(result)
 
-        is_new_best = total_points > best_total
-        if is_new_best:
+        if total_points > best_total:
             best_result = result
             best_total = total_points
 
-        marker = " ★ BEST" if is_new_best else ""
-        logger.info("[%d/%d] %-40s  %.1f pts%s",
-                    idx, total_scenarios, scenario["name"], total_points, marker)
+    if best_result:
+        logger.info("Best of %d solved scenarios: %s (%.1f pts)",
+                    len(scenario_results), best_result["scenario_name"], best_total)
+
+    # Score every solved FH-only plan's best legal Bench Boost GW and/or Triple
+    # Captain GW (whichever is deferred — see the comment above
+    # defer_bench_boost), then re-solve only the top-scored (FH, BB, TC)
+    # combinations as full MILPs (either chip's placement can shift the
+    # wildcard GW the solver picks, so the heuristic score alone isn't
+    # trustworthy enough to skip the re-solve).
+    if (defer_bench_boost or defer_triple_captain) and scenario_results:
+        bb_gws = bench_boost_candidate_gws(
+            start_gw=current_gw, planning_horizon=horizon,
+            used_first_half=bench_boost_used_first_half,
+            used_second_half=bench_boost_used_second_half,
+        ) if defer_bench_boost else []
+        tc_gws = triple_captain_candidate_gws(
+            start_gw=current_gw, planning_horizon=horizon,
+            used_first_half=triple_captain_used_first_half,
+            used_second_half=triple_captain_used_second_half,
+        ) if defer_triple_captain else []
+
+        ranked = []
+        for result in scenario_results:
+            wildcard_gws = [
+                current_gw + t - 1
+                for t, tr in result["solution"]["transfers"].items()
+                if tr.get("wildcard_active")
+            ]
+
+            if defer_bench_boost:
+                bb_gw, bb_bonus = find_best_bench_boost_gw(
+                    lineups_by_t=result["solution"]["lineups"],
+                    expected_points=result["squad_points"],
+                    wildcard_gws=wildcard_gws,
+                    start_gw=current_gw, horizon=horizon,
+                    free_hit_gws=result["free_hit_gws"],
+                    triple_captain_gw=-1,
+                    candidate_gws=bb_gws,
+                    sub_probability=sub_probability,
+                )
+            else:
+                bb_gw = result["bench_boost_gw"] if result["bench_boost_gw"] != -1 else None
+                bb_bonus = 0.0
+
+            if defer_triple_captain:
+                tc_gw, tc_bonus = find_best_triple_captain_gw(
+                    captains_by_t=result["solution"]["captains"],
+                    expected_points=result["squad_points"],
+                    wildcard_gws=wildcard_gws,
+                    start_gw=current_gw, horizon=horizon,
+                    free_hit_gws=result["free_hit_gws"],
+                    bench_boost_gw=bb_gw if bb_gw is not None else -1,
+                    candidate_gws=tc_gws,
+                    sub_probability=sub_probability,
+                )
+            else:
+                tc_gw = result["triple_captain_gw"]
+                tc_gw = tc_gw if tc_gw != -1 else None
+                tc_bonus = 0.0
+
+            if bb_gw is None and tc_gw is None:
+                continue
+            ranked.append((result, bb_gw, tc_gw, bb_bonus + tc_bonus))
+
+        # Dedup identical (FH, BB, TC) allocations — different FH-only scenarios
+        # can independently land on the same BB/TC placement.
+        seen = set()
+        deduped = []
+        for item in ranked:
+            result, bb_gw, tc_gw, _ = item
+            key = (tuple(result["free_hit_gws"]), bb_gw, tc_gw)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        deduped.sort(key=lambda item: item[0]["total_points"] + item[3], reverse=True)
+        chip_top_k = solver_params.get("chip_reselect_candidates", 5)
+        logger.info("Re-solving top %d chip-placement candidate(s) (out of %d scored)...",
+                    min(chip_top_k, len(deduped)), len(deduped))
+
+        chip_candidates = deduped[:chip_top_k]
+        final_scenarios = []
+        for result, bb_gw, tc_gw, _ in chip_candidates:
+            chip_parts = [f"BB GW{bb_gw}"] if bb_gw is not None else []
+            chip_parts += [f"TC GW{tc_gw}"] if tc_gw is not None else []
+            name = " | ".join([result["scenario_name"], *chip_parts]) if chip_parts else result["scenario_name"]
+            final_scenarios.append({
+                "name": name,
+                "free_hit_gws": result["free_hit_gws"],
+                "bench_boost_gw": bb_gw if bb_gw is not None else -1,
+                "triple_captain_gw": tc_gw if tc_gw is not None else -1,
+                "force_wildcard_gw": force_wildcard_gw,
+            })
+        chip_results = solve_scenarios(final_scenarios, solver_ctx, workers=workers)
+
+        for raw in chip_results:
+            if raw["status"] != "solved":
+                continue
+            scenario = raw["scenario"]
+            fh_total = sum(
+                fh_benefits.get(gw, {}).get("total_points", 0)
+                for gw in scenario["free_hit_gws"]
+            )
+            total_points = raw["base_points"] + fh_total
+            if total_points > best_total:
+                best_total = total_points
+                best_result = {
+                    "scenario_name": scenario["name"],
+                    "free_hit_gws": scenario["free_hit_gws"],
+                    "bench_boost_gw": scenario["bench_boost_gw"],
+                    "triple_captain_gw": scenario["triple_captain_gw"],
+                    "base_points": raw["base_points"],
+                    "free_hit_benefit": fh_total,
+                    "total_points": total_points,
+                    "solution": raw["solution"],
+                    "squad_points": raw["squad_points"],
+                    "scenario": scenario,
+                }
+                best_total = total_points
 
     elapsed = time.time() - start_time
     logger.info("Done: %d/%d solved, %d failed in %.0fs",
@@ -659,8 +798,13 @@ def main() -> None:
     logger.info("")
     logger.info("BEST STRATEGY: %s (%.1f pts)", best_result["scenario_name"], best_total)
 
+    # Workers return plain data, not solver objects (a solved PuLP model is
+    # expensive to ship between processes). Rebuilding the winner's solver is
+    # ~0.2s and gives display_strategy the predictions/horizon it reads.
+    best_solver = build_solver(best_result["scenario"], solver_ctx)
+
     strategy_text = display_strategy(
-        best_result["solution"], best_result["solver"], best_result["players"],
+        best_result["solution"], best_solver, best_solver.players,
         current_gw, best_total, best_result["scenario_name"],
         overrides.get("non_playing", []),
         best_result["free_hit_gws"], fh_benefits,

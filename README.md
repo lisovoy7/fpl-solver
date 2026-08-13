@@ -61,6 +61,7 @@ First run takes a few minutes because it fetches per-player stats from the FPL A
 | `--force-free-hit-gw GW` | Force Free Hit on a specific GW (overrides config) |
 | `--force-bench-boost-gw GW` | Force Bench Boost on a specific GW (overrides config) |
 | `--time-limit SECS` | Override solver time limit per scenario (overrides config) |
+| `--workers N` | Scenario solver processes (default: CPU count - 1). `1` disables parallelism, which is what you want when debugging a solve. Also settable via the `FPL_SOLVER_WORKERS` env var |
 
 ## Configuration Reference
 
@@ -109,8 +110,10 @@ Control how the MILP optimization behaves. All have sensible defaults.
 | `solver.max_hist_window` | int | `6` | Upper bound on how many recent gameweeks are considered when checking `min_hist_pct`. Early in the season, before this many GWs exist, the window shrinks to however many GWs have actually been played — there's no lower bound, so a player who started GW1 already qualifies |
 | `solver.sub_probability` | float | `0.10` | Probability that each starting-XI player won't play on any given GW (rotation risk). This determines how much bench value matters. `0.10` means ~1.1 expected substitutions per GW. Set to `0.0` to ignore bench value entirely |
 | `solver.first_gw_transfer_penalty` | float | `-1` | Artificial points penalty per transfer made in the first GW of the horizon. Prevents the solver from making transfers that only look good because GW 1 is the most "certain" in the plan. Negative value = mild penalty |
-| `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. Increase if solutions are suboptimal (solver reports gap > 0) |
+| `solver.time_limit_per_scenario` | int | `15` | Maximum seconds the MILP solver spends on each chip scenario. CBC rarely proves optimality within it, so this caps solution *quality*, not just runtime — raising it is cheap now that scenarios solve in parallel |
+| `solver.mip_gap` | float | `null` | Stop a scenario once CBC is within this relative gap of the best possible objective (`0.005` = 0.5%). `null` solves until the time limit |
 | `solver.max_scenarios` | int | `100` | Cap on total chip scenarios to evaluate. Prevents combinatorial explosion when many chips are unused and the horizon is long |
+| `solver.chip_reselect_candidates` | int | `5` | Bench Boost and Triple Captain are scored post-hoc against an FH-only solve rather than enumerated into the scenario count (see `find_best_bench_boost_gw` / `find_best_triple_captain_gw` in `fpl/free_hit.py`). This caps how many of the top-scored (FH plan, BB GW, TC GW) candidates get re-solved as full MILPs to confirm the real objective. Higher = more thorough, slower |
 
 ### Chip Usage State
 
@@ -147,16 +150,6 @@ chips:
 ```
 
 **Example**: If you know GW 33 is a Double Gameweek and you want to use Free Hit there, set `force_free_hit_gw: 33`. The solver will only generate scenarios with FH on GW 33, instead of testing FH on every eligible GW.
-
-### Transfer Top-up
-
-Models a mid-season transfer window (e.g. AFCON, injury crisis) where the solver is allowed extra free transfers at a specific GW.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `transfer_topup.enabled` | bool | `true` | Whether the top-up rule is active |
-| `transfer_topup.trigger_gw` | int | `15` | The GW at which extra transfers become available |
-| `transfer_topup.transfer_count` | int | `5` | Number of extra free transfers granted at `trigger_gw` |
 
 ### Fixture Overrides
 

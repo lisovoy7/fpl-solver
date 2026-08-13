@@ -64,10 +64,34 @@ solver:
   first_gw_transfer_penalty: -1
 
   # Solver time limit in seconds per chip scenario.
+  #
+  # This is a *quality* knob, not just a speed one: CBC almost never proves
+  # optimality within it, so it caps how good each scenario's plan gets before
+  # the search is cut off. Scenarios now solve in parallel worker processes
+  # (see fpl/scenario_runner.py), so a larger value here is much cheaper than
+  # it used to be — 60 on an 8-worker machine still beats the old sequential
+  # run at 15 on wall clock.
   time_limit_per_scenario: 15
+
+  # Stop a scenario early once CBC is within this relative gap of the best
+  # possible objective (0.005 = 0.5%). null solves until time_limit_per_scenario.
+  # Useful when many scenarios are easy and you would rather spend the wall
+  # clock on the hard ones.
+  mip_gap: null
 
   # Maximum chip scenarios to test (caps combinatorial explosion).
   max_scenarios: 1000
+
+  # Bench Boost and Triple Captain are both scored post-hoc instead of being
+  # multiplied into the FH scenario count — each only ever changes which GW
+  # gets its bonus applied to an otherwise-unchanged plan (Triple Captain
+  # exactly; Bench Boost approximately — see find_best_bench_boost_gw and
+  # find_best_triple_captain_gw in fpl/free_hit.py). This caps how many of the
+  # top-scored (FH plan, BB GW, TC GW) candidates get re-solved as full MILPs
+  # to confirm the true objective. Higher = more thorough, slower. Skipped
+  # per-chip when that chip is forced (force_bench_boost_gw /
+  # force_triple_captain_gw) or already fully used.
+  chip_reselect_candidates: 5
 
 # ---------- Chip usage state ----------
 # Auto-detected from FPL API if omitted. Override here if detection is wrong.
@@ -88,14 +112,6 @@ chips:
   # force_bench_boost_gw: 37
   # # force_triple_captain_gw: 34
   # force_wildcard_gw: 32
-
-# ---------- AFCON Transfer top-up rule ----------
-# After trigger_gw, the solver tops-up the transfer bank to transfer_count free transfers.
-
-transfer_topup:
-  enabled: false
-  trigger_gw: 15
-  transfer_count: 5
 
 # ---------- Fixture overrides (DGW / BGW) ----------
 # Override the gameweek assignment of specific fixtures.  Use this when the

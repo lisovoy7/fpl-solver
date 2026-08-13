@@ -50,9 +50,6 @@ class FPLSolver:
         budget: float,
         start_gw: int,
         solver_name: str = 'CBC',
-        afcon_enabled: bool = True,
-        afcon_trigger_gw: int = 15,
-        afcon_transfer_count: int = 5,
         points_multiplier_override: Optional[List[tuple]] = None,
         forced_lineup_players: Optional[List[tuple]] = None,
         non_playing_players: Optional[List[tuple]] = None,
@@ -71,9 +68,6 @@ class FPLSolver:
             budget: Total budget in units (100 = 10.0M).
             start_gw: Starting gameweek for optimization.
             solver_name: MILP solver to use ('CBC', 'GUROBI', etc.).
-            afcon_enabled: Enable AFCON transfer top-up rule.
-            afcon_trigger_gw: Gameweek after which AFCON transfers are topped up.
-            afcon_transfer_count: Number of transfers to top up to for AFCON.
             points_multiplier_override: List of (player_id, multiplier) tuples.
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
@@ -88,9 +82,6 @@ class FPLSolver:
         self.budget = budget
         self.start_gw = start_gw
         self.solver_name = solver_name
-        self.afcon_enabled = afcon_enabled
-        self.afcon_trigger_gw = afcon_trigger_gw
-        self.afcon_transfer_count = afcon_transfer_count
         self.points_multiplier_override = points_multiplier_override or []
         self.forced_lineup_players = forced_lineup_players or []
         self.non_playing_players = non_playing_players or []
@@ -107,6 +98,7 @@ class FPLSolver:
         self.initial_transfers = 1
         self.prob = None
         self.variables = {}
+        self.proven_optimal = False
 
         logger.debug("Initialized FPL solver with %d GW horizon", planning_horizon)
 
@@ -503,27 +495,16 @@ class FPLSolver:
 
         gameweeks = list(range(1, self.T + 1))
 
-        if self.afcon_enabled and self.start_gw == self.afcon_trigger_gw + 1:
-            effective_initial_transfers = self.afcon_transfer_count
-            logger.debug("AFCON rule applied: initial transfers set to %d", effective_initial_transfers)
-        else:
-            effective_initial_transfers = self.initial_transfers
-
-        self.prob += (self.variables['A'][1] == effective_initial_transfers, "Initial_Transfers")
+        self.prob += (self.variables['A'][1] == self.initial_transfers, "Initial_Transfers")
 
         M = TOTAL_SQUAD_SIZE
 
         for t in range(1, self.T):
             actual_gw = self.start_gw + t - 1
             free_hit_override = actual_gw in self.free_hit_gws
-            afcon_override = self.afcon_enabled and actual_gw == self.afcon_trigger_gw
 
             if free_hit_override:
                 self.prob += (self.variables['A'][t + 1] == self.variables['A'][t], f"FreeHit_Transfer_Preserve_{actual_gw}")
-                self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
-                continue
-            elif afcon_override:
-                self.prob += (self.variables['A'][t + 1] == self.afcon_transfer_count, f"AFCON_Transfer_Override_{t}")
                 self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
                 continue
 
@@ -912,34 +893,61 @@ class FPLSolver:
         logger.debug("MILP model built: %d vars, %d constraints",
                      len(self.prob.variables()), len(self.prob.constraints))
 
-    def solve(self, time_limit: Optional[int] = None) -> bool:
+    def solve(
+        self,
+        time_limit: Optional[int] = None,
+        threads: Optional[int] = None,
+        mip_gap: Optional[float] = None,
+    ) -> bool:
         """
         Solve the MILP model.
 
         Args:
             time_limit: Maximum solving time in seconds.
+            threads: CBC worker threads. None leaves CBC's default (1). Only set
+                this when scenarios are solved one at a time — when scenarios run
+                in parallel processes, threads must stay 1 or the processes
+                oversubscribe the CPU and every solve gets slower.
+            mip_gap: Relative optimality gap to stop at (e.g. 0.005 = 0.5%).
+                None solves to proven optimality or the time limit.
 
         Returns:
-            True if optimal solution found, False otherwise.
+            True if a usable solution was found, False otherwise.
+
+        Note:
+            True does not mean "proven optimal". CBC reports LpStatusOptimal both
+            for a proven optimum and for a feasible incumbent it was still
+            improving when the time limit fired; the two are only distinguishable
+            via `prob.sol_status`. `self.proven_optimal` records which one it was.
         """
         logger.debug("Solving MILP with %s", self.solver_name)
 
         if self.prob is None:
             raise ValueError("Model must be built before solving")
 
-        if self.solver_name.upper() == 'CBC':
-            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
-        elif self.solver_name.upper() == 'GUROBI':
+        options = [f"ratio {mip_gap}"] if mip_gap is not None else []
+        kwargs = {'msg': 0, 'timeLimit': time_limit}
+        if threads is not None:
+            kwargs['threads'] = threads
+
+        if self.solver_name.upper() == 'GUROBI':
             solver = pulp.GUROBI_CMD(msg=0, timeLimit=time_limit)
         else:
-            solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit)
+            solver = pulp.PULP_CBC_CMD(options=options, **kwargs)
 
         self.prob.solve(solver)
         status = pulp.LpStatus[self.prob.status]
-        logger.debug("Solver status: %s", status)
+        self.proven_optimal = self.prob.sol_status == pulp.LpSolutionOptimal
+        logger.debug("Solver status: %s (proven optimal: %s)", status, self.proven_optimal)
 
         if self.prob.status == pulp.LpStatusOptimal:
-            logger.debug("Optimal objective value: %.2f", pulp.value(self.prob.objective))
+            if not self.proven_optimal:
+                logger.debug(
+                    "Time limit reached — returning best incumbent (%.2f), search was not complete",
+                    pulp.value(self.prob.objective),
+                )
+            else:
+                logger.debug("Optimal objective value: %.2f", pulp.value(self.prob.objective))
             return True
         else:
             logger.warning("No optimal solution found")

@@ -169,6 +169,154 @@ def generate_chip_scenarios(
     return scenarios
 
 
+def triple_captain_candidate_gws(
+    start_gw: int,
+    planning_horizon: int,
+    used_first_half: int = 0,
+    used_second_half: int = 0,
+) -> List[int]:
+    """GWs where Triple Captain could still legally be placed, respecting the 1-per-half rule."""
+    all_gws = list(range(start_gw, start_gw + planning_horizon))
+    first_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["first_half"][0] <= gw <= CHIP_WINDOWS["first_half"][1]
+    ]
+    second_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
+    ]
+    return _half_season_chip_options(used_first_half, used_second_half, first_half_gws, second_half_gws)
+
+
+def bench_boost_candidate_gws(
+    start_gw: int,
+    planning_horizon: int,
+    used_first_half: int = 0,
+    used_second_half: int = 0,
+) -> List[int]:
+    """GWs where Bench Boost could still legally be placed, respecting the 1-per-half rule."""
+    all_gws = list(range(start_gw, start_gw + planning_horizon))
+    first_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["first_half"][0] <= gw <= CHIP_WINDOWS["first_half"][1]
+    ]
+    second_half_gws = [
+        gw for gw in all_gws
+        if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
+    ]
+    return _half_season_chip_options(used_first_half, used_second_half, first_half_gws, second_half_gws)
+
+
+def find_best_triple_captain_gw(
+    captains_by_t: Dict[int, int],
+    expected_points: Dict[Tuple[int, int], float],
+    wildcard_gws: List[int],
+    start_gw: int,
+    horizon: int,
+    free_hit_gws: List[int],
+    bench_boost_gw: int,
+    candidate_gws: List[int],
+    sub_probability: float,
+) -> Tuple[Optional[int], float]:
+    """
+    Heuristically score the best legal Triple Captain GW for an already-solved
+    FH x BB plan, without re-solving.
+
+    Triple Captain's only effect on the objective (see solver.py's
+    create_objective) is an extra `lineup_weight * E_pt[captain]` bonus on one
+    GW. The multiplier is uniform across players, so TC never changes who gets
+    captained — it just picks which GW to apply the bonus to. That means the
+    best legal GW for a given plan is simply its own highest-scoring legal
+    captain GW; no re-solve is needed to find it.
+
+    `candidate_gws` should already reflect per-half TC availability (0/1/2
+    used) via triple_captain_candidate_gws(). FH/BB/wildcard GWs are excluded
+    here since the solver enforces at most one chip per GW.
+
+    Returns:
+        (best_gw, bonus) — best_gw is None if no legal GW remains.
+    """
+    lineup_weight = 1.0 - sub_probability
+    excluded = set(free_hit_gws) | {bench_boost_gw} | set(wildcard_gws)
+    best_gw: Optional[int] = None
+    best_bonus = 0.0
+    for gw in candidate_gws:
+        if gw in excluded:
+            continue
+        t = gw - start_gw + 1
+        if not (1 <= t <= horizon):
+            continue
+        captain = captains_by_t.get(t)
+        if captain is None:
+            continue
+        bonus = lineup_weight * expected_points.get((captain, gw), 0.0)
+        if bonus > best_bonus:
+            best_gw, best_bonus = gw, bonus
+    return best_gw, best_bonus
+
+
+def find_best_bench_boost_gw(
+    lineups_by_t: Dict[int, Dict[str, List[int]]],
+    expected_points: Dict[Tuple[int, int], float],
+    wildcard_gws: List[int],
+    start_gw: int,
+    horizon: int,
+    free_hit_gws: List[int],
+    triple_captain_gw: int,
+    candidate_gws: List[int],
+    sub_probability: float,
+) -> Tuple[Optional[int], float]:
+    """
+    Heuristically score the best legal Bench Boost GW for an already-solved
+    FH-only plan, without re-solving.
+
+    Unlike Triple Captain, this is NOT exact. In solver.py's create_objective,
+    a Bench Boost GW raises every squad member from their usual weight
+    (lineup_weight for starters, bench_weight for the bench) up to full 1.0x —
+    i.e. it changes the objective's valuation of the squad the model already
+    picked, rather than adding a fixed bonus on top of an unaffected plan. A
+    solve that knew BB was coming could legitimately pick a different bench
+    (or different transfers) to exploit that GW harder. This function scores
+    what the *already-chosen* lineup would gain — a real approximation of the
+    true jointly-optimal choice, not a shortcut to it. Cheap enough to screen
+    every FH scenario with; the top candidates get a full MILP re-solve
+    afterwards specifically to catch cases where this estimate misleads.
+
+    `candidate_gws` should already reflect per-half BB availability (0/1/2
+    used) via bench_boost_candidate_gws(). FH/TC/wildcard GWs are excluded
+    here since the solver enforces at most one chip per GW.
+
+    Returns:
+        (best_gw, bonus) — best_gw is None if no legal GW remains.
+    """
+    lineup_complement = sub_probability
+    bench_weight = (11.0 * sub_probability) / 4.0
+    bench_complement = 1.0 - bench_weight
+    excluded = set(free_hit_gws) | {triple_captain_gw} | set(wildcard_gws)
+    best_gw: Optional[int] = None
+    best_bonus = 0.0
+    for gw in candidate_gws:
+        if gw in excluded:
+            continue
+        t = gw - start_gw + 1
+        if not (1 <= t <= horizon):
+            continue
+        lineup = lineups_by_t.get(t)
+        if not lineup:
+            continue
+        bonus = sum(
+            lineup_complement * expected_points.get((p, gw), 0.0)
+            for p in lineup.get("starters", [])
+        )
+        bonus += sum(
+            bench_complement * expected_points.get((p, gw), 0.0)
+            for p in lineup.get("bench", [])
+        )
+        if bonus > best_bonus:
+            best_gw, best_bonus = gw, bonus
+    return best_gw, best_bonus
+
+
 # -----------------------------------------------------------------------------
 # Part 2: Free Hit Squad Calculator
 # -----------------------------------------------------------------------------

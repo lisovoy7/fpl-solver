@@ -34,12 +34,7 @@ _DEFAULT_SOLVER = {
     "first_gw_transfer_penalty": -1,
     "time_limit_per_scenario": 15,
     "max_scenarios": 100,
-}
-
-_DEFAULT_TRANSFER_TOPUP = {
-    "enabled": True,
-    "trigger_gw": 15,
-    "transfer_count": 5,
+    "chip_reselect_candidates": 5,
 }
 
 
@@ -115,10 +110,6 @@ def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     if "solver" not in config:
         config["solver"] = {}
     config["solver"] = {**_DEFAULT_SOLVER, **config["solver"]}
-
-    if "transfer_topup" not in config:
-        config["transfer_topup"] = {}
-    config["transfer_topup"] = {**_DEFAULT_TRANSFER_TOPUP, **config["transfer_topup"]}
 
     if "chips" not in config:
         config["chips"] = {}
