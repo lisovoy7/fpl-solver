@@ -118,7 +118,7 @@ class OptimizeRequest(BaseModel):
     # Force into the candidate pool even if they fail the min_hist_pct filter.
     extra_players: list[int] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=30)
-    max_scenarios: int = Field(default=50, ge=1, le=200)
+    max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
     force_free_hit_gw: Optional[int] = None
     force_bench_boost_gw: Optional[int] = None
