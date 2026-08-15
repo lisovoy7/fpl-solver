@@ -440,6 +440,26 @@ The full pipeline executed by `python run.py`:
 
 The solver uses the **CBC** (Coin-or Branch and Cut) solver, which is open-source and bundled with PuLP. No external solver installation required. For faster solves, GUROBI can be used by changing `solver_name` (requires a separate license).
 
+### Why the time limit can't just be lowered
+
+`time_limit_per_scenario` behaves like a quality knob at short horizons and like a **coverage** knob at long ones, and the second is far less forgiving.
+
+CBC reports `LpStatusOptimal` both for a proven optimum and for a time-limited incumbent, so a solve that runs out of time normally returns its best find so far. At horizon 19 (~55k binaries) that stops being true: CBC's feasibility pump often finds *no* integer-feasible point at all, so there is no incumbent to return, the scenario is dropped, and the search silently narrows. If every scenario is dropped the job fails outright with `No feasible solution found`.
+
+Measured end-to-end on Cloud Run (horizon 19, all four chips available, 6 workers, 8 vCPU):
+
+| stage-1 limit | scenarios dropped | objective | wall clock |
+|---|---|---|---|
+| 90s | 0 / 20 | 1187.0 | 386s |
+| 60s | 17 / 20 | 1187.0 | 267s |
+| 15s | 20 / 20 | job failed | — |
+
+The 60s row is the trap: it returned the correct plan having actually evaluated only three Free Hit placements, because the winner happened to survive. The same config dropped only 4 of 25 on a different day, so the failure rate is not even stable. Treat a non-zero INFEASIBLE count in the logs as lost coverage, not noise.
+
+**A warm start does not fix this** — implemented, measured, rejected. Seeding CBC with a trivially feasible plan (hold the squad, no transfers, no chips) works mechanically (`MIPStart values read for 54530 variables`) but anchors the search to the do-nothing neighbourhood: the full pipeline scored **1130.5 seeded vs 1187.0 unseeded** at the same 90s limit, and the seeded plan dropped the wildcard entirely. Cut generation also has to be disabled for a seeded solve to branch at all, costing further quality. And it does not rescue short limits anyway: CBC applies a MIPStart only after the MPS parse, presolve and root LP — past 15s on a shared vCPU — so a 15s limit still dropped every scenario with the seed present and unread.
+
+The way to make this faster is a smaller model (shorter horizon, tighter watchlist), not a shorter limit or a cleverer start.
+
 ### Scenario Parallelism
 
 **Module:** `fpl/scenario_runner.py`
