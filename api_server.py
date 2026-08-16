@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
@@ -401,13 +401,54 @@ def _update_job(job_id: str, status: str, result: Any = None, error: str | None 
         logger.exception("Failed to update solver_jobs for job %s: %s", job_id, exc)
 
 
+# Floor on the gap between two progress writes. A 25-scenario run finishing in a burst
+# would otherwise fire 25 updates in a few seconds, and the frontend polls every 5s —
+# so it could not see them anyway. Phase changes ignore this and always write: they are
+# rare, and they are the part of the bar that tells the user what is happening.
+_PROGRESS_MIN_INTERVAL_S = 2.0
+
+
+def _progress_writer(job_id: str):
+    """
+    Build the callback that turns solve progress into a `solver_jobs.progress` row.
+
+    Deliberately fire-and-forget and swallowing: a solve is minutes long and a failed
+    progress write is not a reason to lose it. The frontend treats a missing or stale
+    progress value as "no signal", not as an error, and falls back to easing the bar on
+    elapsed time — so the worst case of this never working is the old spinner.
+    """
+    state = {"at": 0.0, "phase": ""}
+
+    def report(phase: str, done: int | None = None, total: int | None = None) -> None:
+        if not _supabase:
+            return
+        now = time.monotonic()
+        if phase == state["phase"] and now - state["at"] < _PROGRESS_MIN_INTERVAL_S:
+            return
+        state["at"] = now
+        state["phase"] = phase
+        payload: dict[str, Any] = {"phase": phase}
+        if done is not None and total is not None:
+            payload.update({"done": done, "total": total})
+        try:
+            # "now()" is Postgres's own clock, same as every other write here — which is
+            # also what the frontend's staleness check compares against.
+            _supabase.table("solver_jobs").update(
+                {"progress": payload, "updated_at": "now()"}
+            ).eq("id", job_id).execute()
+        except Exception:
+            logger.debug("Progress write failed for job %s", job_id, exc_info=True)
+
+    return report
+
+
 def _run_and_store(req: OptimizeRequest, job_id: str) -> None:
     """Background task: run optimize pipeline and persist result to Supabase."""
     _update_job(job_id, "running")
     try:
         # Reuse the synchronous optimize logic by calling it inline
         import asyncio
-        result = asyncio.run(_optimize_inner(req))
+        result = asyncio.run(_optimize_inner(req, on_progress=_progress_writer(job_id)))
         _update_job(job_id, "complete", result=result)
         logger.info("Async job %s complete — %.1f pts", job_id, result.get("objective", 0))
     except Exception as exc:
@@ -415,9 +456,20 @@ def _run_and_store(req: OptimizeRequest, job_id: str) -> None:
         _update_job(job_id, "failed", error=str(exc))
 
 
-async def _optimize_inner(req: OptimizeRequest) -> dict:
+# What a run reports as it goes. Only two of the four can count anything — the others
+# are setup and teardown with no natural unit of work — which is why the frontend pairs
+# these checkpoints with time-based easing rather than driving the bar from them alone.
+ProgressFn = Callable[..., None]
+
+
+def _noop_progress(phase: str, done: int | None = None, total: int | None = None) -> None:
+    """Progress sink for the synchronous endpoint, which has nobody to report to."""
+
+
+async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_progress) -> dict:
     """Pure optimization logic shared by /api/optimize and /api/optimize-async."""
     start_time = time.time()
+    on_progress("preparing")
 
     bootstrap = api.fetch_bootstrap_data()
     detected_gw = api.detect_current_gw(bootstrap)
@@ -571,7 +623,14 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
         "mip_gap": None,
     }
 
-    raw_results = solve_scenarios(chip_scenarios, solver_ctx)
+    # Announced before the first solve returns, not after: everything above this point
+    # (bootstrap, predictions, watchlist, free-hit benefits) is a silent minute or so,
+    # and the phase change is what tells the user it ended.
+    on_progress("scenarios", 0, len(chip_scenarios))
+    raw_results = solve_scenarios(
+        chip_scenarios, solver_ctx,
+        on_progress=lambda done, total: on_progress("scenarios", done, total),
+    )
 
     for raw in raw_results:
         if raw["status"] != "solved":
@@ -686,7 +745,11 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
                 "force_wildcard_gw": req.force_wildcard_gw,
             })
 
-        for raw in solve_scenarios(final_scenarios, solver_ctx):
+        on_progress("chip_resolve", 0, len(final_scenarios))
+        for raw in solve_scenarios(
+            final_scenarios, solver_ctx,
+            on_progress=lambda done, total: on_progress("chip_resolve", done, total),
+        ):
             if raw["status"] != "solved":
                 continue
             scenario = raw["scenario"]
@@ -702,6 +765,8 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
 
     if not best_result:
         raise ValueError("No feasible solution found")
+
+    on_progress("finalising")
 
     # Workers return plain data, not solver objects; rebuild the winner's solver
     # (~0.2s, no solve) for the fields _format_solution reads.

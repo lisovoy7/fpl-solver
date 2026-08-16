@@ -28,9 +28,9 @@ took 41s and produced solutions that were better on 2 scenarios and worse on non
 import logging
 import multiprocessing
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from fpl.solver import FPLSolver
 
@@ -169,11 +169,28 @@ def _worker_entry(scenario: Dict) -> Dict:
         return {"scenario": scenario, "status": "error", "error": str(exc)}
 
 
+def _report(on_progress: Optional[Callable[[int, int], None]], done: int, total: int) -> None:
+    """
+    Hand a completion count to the caller's progress hook, and never let it matter.
+
+    The hook writes over the network (a Supabase update), so it can be slow, fail, or
+    throw. None of that is worth losing a solve over — progress is decoration, and a
+    run that reports nothing still finishes and still returns a plan.
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(done, total)
+    except Exception:  # noqa: BLE001 - progress reporting must never break a solve
+        logger.debug("Progress callback failed at %d/%d", done, total, exc_info=True)
+
+
 def solve_scenarios(
     scenarios: List[Dict],
     ctx: Dict,
     workers: Optional[int] = None,
     progress: bool = True,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> List[Dict]:
     """
     Solve every scenario, in parallel when it is worth it.
@@ -183,6 +200,10 @@ def solve_scenarios(
         ctx: Everything build_solver() needs, plus 'time_limit' and optional 'mip_gap'.
         workers: Process count. None uses default_worker_count(); 1 runs in-process.
         progress: Log a line per solved scenario.
+        on_progress: Called (done, total) each time a scenario finishes, in completion
+            order. Exists so a caller can surface a live progress bar; a solve is
+            minutes long and otherwise reports nothing until it is over. Exceptions
+            from it are swallowed.
 
     Returns:
         Results in the same order as `scenarios`. Order is preserved so that the
@@ -200,7 +221,7 @@ def solve_scenarios(
     total = len(scenarios)
     if workers > 1:
         try:
-            results = _solve_pooled(scenarios, ctx, workers)
+            results = _solve_pooled(scenarios, ctx, workers, on_progress)
         except (BrokenProcessPool, OSError, RuntimeError) as exc:
             # A pool can fail to start for reasons that have nothing to do with
             # the model: too little memory for N interpreters, a restricted
@@ -221,11 +242,17 @@ def solve_scenarios(
     for idx, scenario in enumerate(scenarios, 1):
         res = _worker_entry(scenario)
         _log_progress(res, idx, total, progress)
+        _report(on_progress, idx, total)
         results.append(res)
     return results
 
 
-def _solve_pooled(scenarios: List[Dict], ctx: Dict, workers: int) -> List[Dict]:
+def _solve_pooled(
+    scenarios: List[Dict],
+    ctx: Dict,
+    workers: int,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> List[Dict]:
     """Run the scenarios across a process pool. Raises if the pool cannot run."""
     logger.info("Solving %d scenarios across %d worker processes (time limit: %ss each)",
                 len(scenarios), workers, ctx["time_limit"])
@@ -240,9 +267,22 @@ def _solve_pooled(scenarios: List[Dict], ctx: Dict, workers: int) -> List[Dict]:
         initargs=(ctx,),
         mp_context=multiprocessing.get_context("spawn"),
     ) as executor:
-        # chunksize=1: scenario solve times vary by an order of magnitude, so
-        # batching would leave workers idle behind one slow chunk.
-        return list(executor.map(_worker_entry, scenarios, chunksize=1))
+        # submit + as_completed rather than executor.map: map yields in *input* order,
+        # so a slow first scenario hides the fact that ten others already finished and
+        # there is nothing to report progress from until the run is nearly over.
+        #
+        # One scenario per submit, no batching: solve times vary by an order of
+        # magnitude, so a chunk would leave workers idle behind its slowest member.
+        index_of = {executor.submit(_worker_entry, s): i for i, s in enumerate(scenarios)}
+        results: List[Optional[Dict]] = [None] * len(scenarios)
+        for done, future in enumerate(as_completed(index_of), 1):
+            # Placed back at its input index — the caller picks the best scenario by
+            # iterating this list, and completion order under a pool is not
+            # reproducible, so returning it that way would make the chosen plan
+            # non-deterministic across identical runs.
+            results[index_of[future]] = future.result()
+            _report(on_progress, done, len(scenarios))
+        return results  # type: ignore[return-value]
 
 
 def _log_progress(res: Dict, idx: int, total: int, progress: bool) -> None:
