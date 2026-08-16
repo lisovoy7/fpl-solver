@@ -20,6 +20,7 @@ Detailed internals of the fpl-solver prediction engine and MILP decision engine.
   - [Chip Handling](#chip-handling)
   - [Free Hit Sub-Problem](#free-hit-sub-problem)
   - [Chip Scenario Enumeration](#chip-scenario-enumeration)
+  - [Rejected: Endogenous Free Hit](#rejected-endogenous-free-hit)
 - [End-to-End Pipeline](#end-to-end-pipeline)
 
 ---
@@ -394,6 +395,31 @@ Each scenario is solved independently by the main MILP solver. The scenario with
 **Forced chip GWs:** When `force_free_hit_gw`, `force_bench_boost_gw`, `force_triple_captain_gw`, or `force_wildcard_gw` is set in config, that chip is pinned to the specified GW and no other options are enumerated for it. For Wildcard, the solver adds a hard constraint forcing the wildcard decision variable to 1 on the specified GW and 0 elsewhere.
 
 **Complexity control:** The `max_scenarios` config param (default: 100) caps the number of scenarios tested — mostly a backstop now that BB/TC deferral keeps the FH-only scenario count small (roughly linear in horizon, not quadratic) in the common case.
+
+### Rejected: Endogenous Free Hit
+
+Spiked and reverted — not in the codebase. Recorded so the idea isn't tried again without knowing why it lost.
+
+The premise: Free Hit doesn't strictly need to be enumerated. `calculate_optimal_free_hit_squad()` builds its squad from scratch against the full budget and never reads the current squad or any main-solver decision, so the benefit of playing Free Hit in GW *g* is a **constant** — "which GW gets it" is a plain linear term with fixed coefficients. Adding a binary `fh[t]` per GW with objective coefficient `fh_benefit[gw]`, and rewriting every FH-conditioned constraint (points override, squad freeze, transfer banking, budget relaxation, lineup/captain collapse, chip conflicts) as a function of `fh[t]` instead of a pinned scenario, is therefore an **exact reformulation**, not an approximation like the Bench Boost heuristic above. That part checked out: verified to 4 decimal places against a full placement sweep on a synthetic 6-GW instance (both picked the same GW, objectives agreed to 0.0000).
+
+It was rejected on latency, not correctness. Measured on a synthetic 6-GW / 120-player instance, solving to proven optimality:
+
+| Model | Root LP | MIP | Root gap | Time |
+| --- | --- | --- | --- | --- |
+| Pinned, FH = none | 512.07 | 500.34 | 2.35% | 9.5s |
+| Pinned, FH = GW15 | 520.29 | 510.53 | 2.31% | 3.4s |
+| Endogenous | 562.08 | 510.53 | **10.10%** | 98.6s |
+
+Seven pinned solves covering every placement took 41.7s *sequentially*; the single endogenous solve took 91.3s, and unlike the sweep it cannot be spread across a worker pool at all — it's one MILP. The cause is the root gap: a fractional `fh[t]` collects the Free Hit benefit in proportion while the lineup-size row (`Σy = 11·(1−fh[t])`) only sheds *marginal* starters, so the LP relaxation buys a bound it can never reach.
+
+Two tightenings were tried against that gap and both failed to move it meaningfully:
+
+- **Per-player `y[p,t] ≤ 1−fh[t]`** (forcing a fractional Free Hit to spread its lost starters instead of concentrating them on the cheapest): moved the bound 564.12 → 563.81 against a 53.6-point gap, for 720 extra rows.
+- **Tightening the budget big-M** on the relaxed budget row from a hand-picked constant to the exact `Σ(15 dearest players) − budget`: moved the bound 564.12 → 562.08 — the correct number, but not the lever.
+
+The gap gets worse, not better, at longer horizons — the opposite of what would be needed for this to eventually pay off. At 10 GWs / 200 players (11 sweep scenarios vs. 1 endogenous solve, both capped at a few minutes per scenario): the sweep finished all 11 within its per-scenario limit and found 885.41; the endogenous solve hit its time limit still short of proven-optimal and returned 883.44 — 2 points *worse* than the sweep despite spending comparable total wall-clock on one tree instead of eleven.
+
+The one property that argued *for* this approach, and the reason it's worth someone revisiting if the tradeoffs change: graceful degradation under a time limit. The endogenous model returns the best incumbent it found **across all placements**, whereas the sweep drops whole placements it can't finish inside `time_limit_per_scenario` (see the coverage table above — 17 of 20 dropped at 60s). If a future run becomes limited by scenarios silently going INFEASIBLE rather than by total wall-clock, this formulation would fail softly where the sweep doesn't — but at the horizons currently in use, CBC's single-tree performance loses to independent parallel solves badly enough that this doesn't pay for itself. A CBC → HiGHS swap was not tested and could change the calculus; worth trying that before resurrecting this.
 
 ### Post-Hoc Bench Boost / Triple Captain Placement
 
