@@ -106,17 +106,37 @@ class NonPlayingEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class ForcedLineupEntry(BaseModel):
+    """One player who must be in the starting XI for a set of gameweeks. Mirrors the
+    `forced_lineup` shape in config.yaml, same as NonPlayingEntry does for non_playing.
+
+    An entry with no gameweeks is dropped rather than treated as "every gameweek" —
+    forcing a start across a whole horizon is a constraint nobody asks for by accident,
+    so it has to be spelled out gameweek by gameweek."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
 class OptimizeRequest(BaseModel):
     """Input payload for the /api/optimize endpoint."""
     team_id: int
-    free_transfers: int = Field(ge=1, le=5)
+    # 0 is legitimate, not a degenerate input: a manager who has already spent this
+    # week's transfer is planning from zero, and any transfer the plan makes in the first
+    # gameweek should cost 4 points. The MILP already models it — `A` (transfers_available)
+    # is declared lowBound=0 in fpl/solver.py — so only this validator was rejecting it.
+    free_transfers: int = Field(ge=0, le=5)
     # 19 = the chip half-season boundary (GW1-19 vs GW20-38, see CHIP_WINDOWS in
     # fpl/free_hit.py) — the default and ceiling both reach exactly that far from
     # a GW1 start. horizon = min(planning_horizon, 38 - current_gw + 1) below still
     # clamps to whatever's actually left in the season later on.
     planning_horizon: int = Field(default=19, ge=1, le=19)
     use_chips: bool = True
-    forced_lineup: list[int] = Field(default_factory=list)
+    # Per-gameweek, matching config.yaml. This was a flat list[int] that got expanded to
+    # `range(current_gw, current_gw + horizon)` — i.e. the API could only ever say "start
+    # this player in EVERY gameweek of the plan", which at the default horizon of 19 is a
+    # near-certain infeasibility and never what "start Palmer in GW27" meant. The solver
+    # itself always took (player, [gws]) tuples; only this layer flattened them away.
+    forced_lineup: list[ForcedLineupEntry] = Field(default_factory=list)
     excluded_players: list[int] = Field(default_factory=list)
     # Zero out these players' points for the listed GWs (injury/suspension/rotation).
     # Note: `excluded_players` still wins over `extra_players` — create_watchlist drops
@@ -524,7 +544,15 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
 
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
-    must_include = list(dict.fromkeys(list(current_squad) + list(req.extra_players)))
+    # forced_lineup players are promoted too, mirroring run.py: a forced start is only
+    # enforceable if the player is in the candidate pool at all, so without this the
+    # constraint is silently dropped for anyone who didn't clear min_hist_pct — the
+    # caller's instruction disappears with no error and a plausible plan comes back.
+    must_include = list(dict.fromkeys(
+        list(current_squad)
+        + list(req.extra_players)
+        + [e.player for e in req.forced_lineup]
+    ))
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else 0.6
@@ -587,14 +615,14 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     if len(chip_scenarios) > req.max_scenarios:
         chip_scenarios = chip_scenarios[:req.max_scenarios]
 
-    forced_lineup_tuples = [(pid, list(range(current_gw, current_gw + horizon))) for pid in req.forced_lineup]
+    forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
         fh_benefits = calculate_free_hit_benefits_for_horizon(
             start_gw=current_gw, planning_horizon=horizon, budget=total_budget,
             predictions_df=predictions, gw_data_df=gw_data,
             watchlist_players=watchlist,
-            forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
+            forced_lineup_players=forced_lineup_tuples,
             non_playing_players=non_playing_tuples,
         )
 
@@ -608,7 +636,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "budget": total_budget,
         "start_gw": current_gw,
         "points_multiplier": None,
-        "forced_lineup": forced_lineup_tuples if req.forced_lineup else None,
+        "forced_lineup": forced_lineup_tuples,
         "non_playing": non_playing_tuples,
         "first_gw_penalty": -1,
         "sub_probability": 0.10,
