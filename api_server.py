@@ -250,27 +250,67 @@ def _format_solution(
             for pid in bench_ids:
                 gw_pts += expected_points.get((pid, gw), 0)
 
+        fh_squad = None
         if chip == "free_hit" and fh_benefits and gw in fh_benefits:
             fh = fh_benefits[gw]
             gw_pts = fh.get("total_points", 0)
+            if fh.get("squad_details"):
+                fh_squad = fh["squad_details"]
 
-        starters = [
-            {
-                **_player_info(bootstrap, pid),
-                "expected_points": round(expected_points.get((pid, gw), 0), 1),
-                "is_captain": pid == captain_id,
-                "is_vice_captain": False,
-            }
-            for pid in lineup_ids
-        ]
-        bench = [
-            {
-                **_player_info(bootstrap, pid),
-                "expected_points": round(expected_points.get((pid, gw), 0), 1),
-                "bench_order": idx + 1,
-            }
-            for idx, pid in enumerate(bench_ids)
-        ]
+        if fh_squad is not None:
+            # The main MILP doesn't model Free Hit weeks: add_lineup_constraints()
+            # skips lineup size / captaincy for them and every prediction is zeroed,
+            # so solution["lineups"][t] is an empty starting XI, a 15-man bench and
+            # no captain. The real FH squad comes from the sub-MILP instead.
+            # squad_details is keyed by position, which also gives the bench a
+            # stable GK->DEF->MID->FWD order (the sub-solver has no bench ordering).
+            fh_players = [
+                p
+                for pos in ["GK", "DEF", "MID", "FWD"]
+                for p in fh_squad.get(pos, [])
+            ]
+            fh_captain = next(
+                (p["element"] for p in fh_players if p.get("is_captain")), None
+            )
+            captain_id = fh_captain if fh_captain is not None else captain_id
+            starters = [
+                {
+                    **_player_info(bootstrap, p["element"]),
+                    "expected_points": round(p.get("points", 0), 1),
+                    "is_captain": bool(p.get("is_captain")),
+                    "is_vice_captain": False,
+                }
+                for p in fh_players
+                if p.get("is_starter")
+            ]
+            bench = [
+                {
+                    **_player_info(bootstrap, p["element"]),
+                    "expected_points": round(p.get("points", 0), 1),
+                    "bench_order": idx + 1,
+                }
+                for idx, p in enumerate(
+                    [p for p in fh_players if not p.get("is_starter")]
+                )
+            ]
+        else:
+            starters = [
+                {
+                    **_player_info(bootstrap, pid),
+                    "expected_points": round(expected_points.get((pid, gw), 0), 1),
+                    "is_captain": pid == captain_id,
+                    "is_vice_captain": False,
+                }
+                for pid in lineup_ids
+            ]
+            bench = [
+                {
+                    **_player_info(bootstrap, pid),
+                    "expected_points": round(expected_points.get((pid, gw), 0), 1),
+                    "bench_order": idx + 1,
+                }
+                for idx, pid in enumerate(bench_ids)
+            ]
 
         gw_entry = {
             "gw": gw,
