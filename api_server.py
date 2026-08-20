@@ -201,6 +201,29 @@ def _player_name(players: pd.DataFrame, pid: int) -> str:
     return row["name"].iloc[0] if len(row) else str(pid)
 
 
+def _wildcard_state(use_chips: bool, override: Optional[int], detected: int) -> int:
+    """
+    How many wildcards to treat as already spent, 0-2.
+
+    `use_chips: false` means "no chips", and that has to include the wildcard. The other
+    three are enumerated into scenarios, so collapsing to the single "No chips" scenario
+    rules them out on its own — but the wildcard is a decision *variable* inside the MILP,
+    the same in every scenario, so nothing about scenario selection touches it. The only
+    thing that takes it off the table is chip state saying both halves are gone, which is
+    what this returns.
+
+    Left unsaid, a "no chips" plan would come back playing a wildcard — and looking
+    entirely reasonable while doing it, since a wildcard week shows no points hit.
+
+    Wins over an explicit `wildcards_used` for the same reason: `use_chips: false` is the
+    broader instruction, and honouring the narrower one would mean silently planning with
+    a chip the caller ruled out.
+    """
+    if not use_chips:
+        return 2
+    return override if override is not None else detected
+
+
 def _resolve_money(
     req: "OptimizeRequest",
     current_squad: List[int],
@@ -703,7 +726,9 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     def _chip_state(override: Optional[int], key: str) -> int:
         return override if override is not None else detected_chips.get(key, 0)
 
-    wildcards_used = _chip_state(req.wildcards_used, "wildcards_used")
+    wildcards_used = _wildcard_state(
+        req.use_chips, req.wildcards_used, detected_chips.get("wildcards_used", 0)
+    )
     free_hits_used = _chip_state(req.free_hits_used, "free_hits_used")
     bench_boost_used = _chip_state(req.bench_boost_used, "bench_boost_used")
     triple_captain_used = _chip_state(req.triple_captain_used, "triple_captain_used")
