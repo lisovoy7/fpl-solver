@@ -96,7 +96,6 @@ def _build_strategy_text(
     start_gw: int, total_points: float, scenario_name: str,
     non_playing: List[Tuple[int, List[int]]],
     free_hit_gws: List[int], fh_benefits: Dict,
-    initial_bank: int, initial_selling_prices: Dict[int, int],
 ) -> str:
     """
     Build the full visual strategy text.
@@ -105,7 +104,6 @@ def _build_strategy_text(
         Multi-line string with the formatted strategy.
     """
     non_playing = non_playing or []
-    initial_selling_prices = initial_selling_prices or {}
     lines: List[str] = []
     W = 78
 
@@ -114,7 +112,6 @@ def _build_strategy_text(
     for _, row in predictions.iterrows():
         key = (int(row["element"]), int(row["event"]))
         expected_points[key] = expected_points.get(key, 0) + row["predicted_points"]
-    player_market_prices = dict(zip(players["element"], players["value"]))
 
     # Header
     lines.append("=" * W)
@@ -122,9 +119,6 @@ def _build_strategy_text(
     lines.append(f"  GW {start_gw}-{start_gw + solver.T - 1}  |  {total_points:.1f} expected pts  |  {total_points / solver.T:.1f} per GW")
     lines.append(f"  Scenario: {scenario_name}")
     lines.append("=" * W)
-
-    cumulative_bank = initial_bank
-    selling_prices = dict(initial_selling_prices)
 
     for i, gw in enumerate(range(start_gw, start_gw + solver.T)):
         t = i + 1
@@ -184,17 +178,9 @@ def _build_strategy_text(
         available_ft = int(transfers.get("available_transfers", 0))
         lines.append(f"  Free Transfers: {available_ft}")
 
-        # Track bank
-        if transfers["out"]:
-            for pid in transfers["out"]:
-                sell_price = selling_prices.get(pid, player_market_prices.get(pid, 0))
-                cumulative_bank += sell_price
-                selling_prices.pop(pid, None)
-        if transfers["in"]:
-            for pid in transfers["in"]:
-                buy_price = player_market_prices.get(pid, 0)
-                cumulative_bank -= buy_price
-                selling_prices[pid] = buy_price
+        # Read off the model rather than re-derived here, so the printed bank can never
+        # disagree with the balance the plan was actually constrained by.
+        bank_units = solution.get("bank", {}).get(t)
 
         # Transfers
         if is_fh:
@@ -289,7 +275,8 @@ def _build_strategy_text(
                     starter = "*" if p["starter"] else " "
                     cap = " (C)" if p["captain"] else ""
                     lines.append(f"      {starter} {p['name']:<25s} {p['cost']:5.1f}M | {p['pts']:5.1f} pts{cap}")
-            lines.append(f"    Bank: {cumulative_bank / 10:.1f}M")
+            if bank_units is not None:
+                lines.append(f"    Bank: {bank_units / 10:.1f}M")
 
     lines.append("")
     lines.append("=" * W)
@@ -299,8 +286,7 @@ def _build_strategy_text(
 def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
                      start_gw: int, total_points: float, scenario_name: str,
                      non_playing: List[Tuple[int, List[int]]],
-                     free_hit_gws: List[int], fh_benefits: Dict,
-                     initial_bank: int, initial_selling_prices: Dict[int, int]) -> str:
+                     free_hit_gws: List[int], fh_benefits: Dict) -> str:
     """
     Display the optimal strategy to console and return the text.
 
@@ -309,7 +295,7 @@ def display_strategy(solution: Dict, solver: FPLSolver, players: pd.DataFrame,
     """
     text = _build_strategy_text(
         solution, solver, players, start_gw, total_points, scenario_name,
-        non_playing, free_hit_gws, fh_benefits, initial_bank, initial_selling_prices,
+        non_playing, free_hit_gws, fh_benefits,
     )
     print(text)
     return text
@@ -393,7 +379,14 @@ def main() -> None:
     selling_info, selling_summary = api.get_squad_selling_prices(team_id, squad_gw)
     total_budget = selling_summary["correct_budget"]
     initial_bank = selling_summary["bank"]
-    initial_selling_prices = selling_summary["selling_prices"]
+    # What each owned player loses against his market price when sold. The solver applies
+    # it to whichever price its own player data carries, so a discount travels correctly
+    # even if that data is a day behind bootstrap.
+    selling_discounts = {
+        row["element"]: row["market_price"] - row["selling_value"]
+        for row in selling_info
+        if row["market_price"] > row["selling_value"]
+    }
 
     logger.info("Budget: %.1fM (bank: %.1fM), squad: %d players",
                 total_budget / 10, initial_bank / 10, len(current_squad))
@@ -625,6 +618,8 @@ def main() -> None:
         "wildcard_second_half": max(0, wildcards_used - 1),
         "time_limit": time_limit,
         "mip_gap": solver_params.get("mip_gap"),
+        "bank": initial_bank,
+        "selling_discounts": selling_discounts,
     }
 
     workers = args.workers if args.workers is not None else default_worker_count()
@@ -808,7 +803,6 @@ def main() -> None:
         current_gw, best_total, best_result["scenario_name"],
         overrides.get("non_playing", []),
         best_result["free_hit_gws"], fh_benefits,
-        initial_bank, initial_selling_prices,
     )
 
     save_strategy(best_result["solution"], best_result["scenario_name"],

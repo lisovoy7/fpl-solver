@@ -87,6 +87,8 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         triple_captain_gw=scenario["triple_captain_gw"],
         free_hit_gws=scenario["free_hit_gws"],
         force_wildcard_gw=scenario.get("force_wildcard_gw"),
+        bank=ctx.get("bank"),
+        selling_discounts=ctx.get("selling_discounts"),
     )
     solver.load_predictions(ctx["predictions"])
     if len(solver.predictions) == 0:

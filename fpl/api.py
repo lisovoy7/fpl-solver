@@ -498,6 +498,12 @@ def get_squad_selling_prices(
     bootstrap = fetch_bootstrap_data()
     player_names = {p["id"]: f"{p.get('first_name', '')} {p.get('second_name', '')}".strip() for p in bootstrap["elements"]}
     player_costs = {str(p["id"]): int(p.get("now_cost", 0)) for p in bootstrap["elements"]}
+    # Price at the start of the season, for squad members who were never transferred in.
+    # `cost_change_start` is the movement since then, so subtracting it inverts it exactly.
+    player_start_costs = {
+        str(p["id"]): int(p.get("now_cost", 0)) - int(p.get("cost_change_start", 0))
+        for p in bootstrap["elements"]
+    }
 
     if gw is None:
         gw = detect_current_gw(bootstrap)
@@ -519,7 +525,19 @@ def get_squad_selling_prices(
         pid = int(pick["element"])
         name = player_names.get(str(pid), "Unknown")
         market_price = player_costs.get(str(pid), 0)
-        purchase_price, _ = purchase_prices.get(pid, (market_price, "gw1_estimate"))
+        # A squad member absent from the transfer feed was in the manager's opening squad,
+        # so they were bought at the season-start price. Assuming today's price instead
+        # (what this did before) wipes out their whole rise and over-states the selling
+        # value by half of it — the single biggest error in this calculation once prices
+        # start moving.
+        #
+        # Managers who joined after GW1 bought their opening squad at that later
+        # gameweek's prices, so this over-states their rises. Not corrected on purpose:
+        # it needs a per-player price history lookup (15 extra API calls per solve) for a
+        # small minority of managers, and it is no worse than the old behaviour.
+        purchase_price, _ = purchase_prices.get(
+            pid, (player_start_costs.get(str(pid), market_price), "season_start")
+        )
         selling_value = calculate_selling_value(market_price, purchase_price)
         total_selling += selling_value
         result_list.append({

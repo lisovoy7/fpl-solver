@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
@@ -117,6 +117,17 @@ class ForcedLineupEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class SellingPriceEntry(BaseModel):
+    """What one player the manager already owns would actually raise if sold.
+
+    FPL never publishes this: a player who has risen sells for his purchase price plus
+    half the rise, so it depends on what this particular manager paid. The caller
+    normally has it already (it is on the squad card the user confirmed), and sending it
+    saves re-deriving it from transfer history here."""
+    player: int
+    selling_value: float = Field(gt=0, le=30)
+
+
 class OptimizeRequest(BaseModel):
     """Input payload for the /api/optimize endpoint."""
     team_id: int
@@ -168,6 +179,12 @@ class OptimizeRequest(BaseModel):
     # budget derived from a different squad is worse than either alone.
     squad: Optional[list[int]] = Field(default=None, min_length=15, max_length=15)
     total_budget: Optional[float] = Field(default=None, gt=0, le=200)
+    # Cash in hand in £m, and the per-player sale prices behind `total_budget`. Both are
+    # optional and derived from the FPL API when absent, but sending them is what makes
+    # the plan's money exact: without the sale prices every owned player is assumed to
+    # sell for his market price, which over-states what a risen squad can raise.
+    bank: Optional[float] = Field(default=None, ge=0, le=200)
+    selling_prices: Optional[list[SellingPriceEntry]] = Field(default=None)
 
 
 class SquadRequest(BaseModel):
@@ -182,6 +199,79 @@ class SquadRequest(BaseModel):
 def _player_name(players: pd.DataFrame, pid: int) -> str:
     row = players[players["element"] == pid]
     return row["name"].iloc[0] if len(row) else str(pid)
+
+
+def _resolve_money(
+    req: "OptimizeRequest",
+    current_squad: List[int],
+    bootstrap: dict,
+    squad_gw: int,
+) -> Tuple[int, int, Dict[int, int]]:
+    """
+    Work out the three money inputs the pipeline needs, all in tenths of a million.
+
+    Returns:
+        (total_budget, bank, selling_discounts) — the squad's sale value plus cash, the
+        cash on its own, and per-player {market price - sale price} for the players the
+        manager already owns.
+
+    The caller's own figures win where given: they come from a squad the user confirmed,
+    which outranks anything the FPL API reports (it is only ever current as of the last
+    deadline, and pre-season it reports nothing). Falling back to the API costs three
+    requests, which is why it is skipped whenever the caller has supplied the answer.
+    """
+    market = {int(e["id"]): int(e.get("now_cost", 0)) for e in bootstrap.get("elements", [])}
+
+    selling: Dict[int, int] = {}
+    fetched: Optional[dict] = None
+    if req.selling_prices:
+        selling = {e.player: int(round(e.selling_value * 10)) for e in req.selling_prices}
+    else:
+        try:
+            _, fetched = api.get_squad_selling_prices(req.team_id, squad_gw)
+            selling = dict(fetched["selling_prices"])
+        except Exception as exc:
+            if req.total_budget is None:
+                # Nothing to fall back on — the pipeline cannot price a squad at all.
+                raise
+            # A confirmed budget is enough to plan with. Every owned player is then
+            # assumed to sell for his market price, which is what this did before sale
+            # prices existed: no worse, just less precise for a squad that has risen.
+            logger.warning(
+                "Selling prices unavailable for team %d (%s); assuming market prices",
+                req.team_id, exc,
+            )
+
+    def sale_price(pid: int) -> int:
+        return selling.get(pid, market.get(pid, 0))
+
+    squad_sale_value = sum(sale_price(pid) for pid in current_squad)
+
+    if req.total_budget is not None:
+        # Pipeline works in tenths of a million throughout; the API takes £m.
+        total_budget = int(round(req.total_budget * 10))
+    else:
+        total_budget = int(fetched["correct_budget"])
+
+    if req.bank is not None:
+        bank = int(round(req.bank * 10))
+    elif req.total_budget is None and fetched is not None:
+        bank = int(fetched["bank"])
+    else:
+        # `total_budget` is squad sale value + bank by definition, so this inverts it.
+        bank = max(0, total_budget - squad_sale_value)
+
+    discounts = {
+        pid: market[pid] - sale_price(pid)
+        for pid in current_squad
+        if pid in market and market[pid] > sale_price(pid)
+    }
+
+    logger.info(
+        "Money: budget %.1fM, bank %.1fM, %d players below market (%.1fM total)",
+        total_budget / 10, bank / 10, len(discounts), sum(discounts.values()) / 10,
+    )
+    return total_budget, bank, discounts
 
 
 def _player_info(bootstrap: dict, pid: int) -> dict:
@@ -225,6 +315,8 @@ def _format_solution(
         lineup_data = solution["lineups"].get(t, {})
         lineup_ids = lineup_data.get("starters", []) if lineup_data else []
         bench_ids = lineup_data.get("bench", []) if lineup_data else []
+
+        bank_units = solution.get("bank", {}).get(t)
 
         real_in = [p for p in transfers["in"] if p not in transfers["out"]]
         real_out = [p for p in transfers["out"] if p not in transfers["in"]]
@@ -323,6 +415,12 @@ def _format_solution(
             "expected_points": round(gw_pts, 1),
             "free_transfers_available": int(transfers.get("available_transfers", 0)),
             "paid_transfers": int(transfers.get("paid_transfers", 0)),
+            # Cash left after this gameweek's moves, in £m. A planning figure, not a
+            # forecast: the pipeline holds prices still for the whole horizon, so this is
+            # what the manager would have left if nobody's price moved between now and
+            # then. On a Free Hit gameweek no money changes hands, so it carries across
+            # from the previous gameweek unchanged.
+            "bank": round(bank_units / 10, 1) if bank_units is not None else None,
         }
         gameweeks_output.append(gw_entry)
 
@@ -554,12 +652,9 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         team_data = api.fetch_team_data(req.team_id, squad_gw)
         current_squad = team_data["squad"]
 
-    if req.total_budget is not None:
-        # Pipeline works in tenths of a million throughout; the API takes £m.
-        total_budget = int(round(req.total_budget * 10))
-    else:
-        _, selling_summary = api.get_squad_selling_prices(req.team_id, squad_gw)
-        total_budget = selling_summary["correct_budget"]
+    total_budget, bank, selling_discounts = _resolve_money(
+        req, current_squad, bootstrap, squad_gw
+    )
 
     multipliers = pd.read_csv(DATA_DIR / "multipliers.csv")
     team_tiers = pd.read_csv(DATA_DIR / "team_tiers.csv")
@@ -689,6 +784,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "wildcard_second_half": max(0, wildcards_used - 1),
         "time_limit": req.time_limit_per_scenario,
         "mip_gap": None,
+        "bank": bank,
+        "selling_discounts": selling_discounts,
     }
 
     # Announced before the first solve returns, not after: everything above this point
