@@ -312,6 +312,38 @@ $$
 
 The third constraint ensures $h_t = 0$ when Wildcard is active (all transfers are free during WC).
 
+Those three bound $h_t$ from below but do not *pin* it, so two more are needed, with
+a per-gameweek indicator $z_t \in \{0,1\}$ ("hits needed"):
+
+$$
+h_t \leq u_t - A_t + M \cdot (1 - z_t) + M \cdot w_t
+$$
+
+$$
+h_t \leq M \cdot z_t + M \cdot w_t
+$$
+
+$z_t = 1$ forces $h_t = u_t - A_t$ (with $h_t \geq 0$ requiring $u_t \geq A_t$);
+$z_t = 0$ forces $h_t = 0$ (with $h_t \geq u_t - A_t$ requiring $u_t \leq A_t$).
+
+**Why this has to be structural rather than a cost.** Without the pin, the model can
+*over-declare* $h_t$. That looks pointless — each declared hit costs 4 points — but
+transfer banking spends $u_t - h_t$, so declaring a transfer paid un-spends a free
+transfer and rolls it forward. A $-4$ buys a banked free transfer, which saves at
+most one future $-4$: exactly break-even. The phantom plan therefore ties with the
+honest one on objective value *and carries the same total hit count*, just placed in
+different gameweeks, so CBC returns whichever vertex it reaches first and no
+objective tie-break (an $\epsilon$ per hit, say) can distinguish them. It has to be
+infeasible.
+
+Observed in the wild before the fix: a GW1–19 plan that charged $-4$ in GW12 and GW13
+while holding a free transfer in each, to bank four transfers for a GW16 that then
+looked free. The totals were right ($-28$ either way) but the plan was not executable
+— FPL applies free transfers first and gives you no way to decline one, so following
+it leaves you short of the transfers the later gameweeks assume.
+
+Regression test: `tests/test_transfer_penalty.py`.
+
 #### Blank Gameweek (BGW) Handling
 
 Players with no fixture in a GW (no entry in `expected_points`) are prevented from starting or being captain:

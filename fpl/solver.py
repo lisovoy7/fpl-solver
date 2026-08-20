@@ -347,6 +347,8 @@ class FPLSolver:
             cat='Integer',
         )
         variables['wildcard'] = pulp.LpVariable.dicts("wildcard", gameweeks, cat='Binary')
+        # Selects which branch of penalty_transfers = max(0, u - A) applies.
+        variables['hits_needed'] = pulp.LpVariable.dicts("hits_needed", gameweeks, cat='Binary')
 
         self.variables = variables
         logger.debug("Created all decision variables")
@@ -858,6 +860,30 @@ class FPLSolver:
             self.prob += (
                 self.variables['penalty_transfers'][t] <= M_transfers * (1 - self.variables['wildcard'][t]),
                 f"Penalty_Wildcard_Zero_{t}",
+            )
+
+            # Pin penalty_transfers to exactly max(0, u - A); hits_needed picks the
+            # branch and the lower bounds above force the two cases to agree. The
+            # bounds alone leave it free to exceed max(0, u - A), and
+            # add_transfer_banking_constraints() banks A[t+1] off `u -
+            # penalty_transfers`, so over-declaring a hit un-spends a free transfer
+            # and rolls it forward — charging -4 in a gameweek that had a free
+            # transfer spare, which FPL will not do. It has to be infeasible rather
+            # than merely costly: the trade is break-even (a -4 buys a banked
+            # transfer worth at most one future -4) and the phantom plan carries the
+            # same hit count as the honest one, so no objective tie-break sees it.
+            self.prob += (
+                self.variables['penalty_transfers'][t]
+                <= self.variables['u'][t] - self.variables['A'][t]
+                + M_transfers * (1 - self.variables['hits_needed'][t])
+                + M_transfers * self.variables['wildcard'][t],
+                f"Penalty_Exact_When_Needed_{t}",
+            )
+            self.prob += (
+                self.variables['penalty_transfers'][t]
+                <= M_transfers * self.variables['hits_needed'][t]
+                + M_transfers * self.variables['wildcard'][t],
+                f"Penalty_Zero_When_Covered_{t}",
             )
 
         for t in gameweeks:
