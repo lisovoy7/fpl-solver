@@ -312,37 +312,43 @@ $$
 
 The third constraint ensures $h_t = 0$ when Wildcard is active (all transfers are free during WC).
 
-Those three bound $h_t$ from below but do not *pin* it, so two more are needed, with
-a per-gameweek indicator $z_t \in \{0,1\}$ ("hits needed"):
+Those three bound $h_t$ from below but never *pin* it to $\max(0, u_t - A_t)$, so a
+solve may report a larger $h_t$ than the free-transfer balance makes unavoidable.
+`FPLSolver.extract_solution()` rebuilds the ledger rather than trusting $h_t$: it
+walks the gameweeks spending free transfers before hits, exactly as FPL does, and
+reports that.
 
-$$
-h_t \leq u_t - A_t + M \cdot (1 - z_t) + M \cdot w_t
-$$
+**Why the slack exists, and why it is fixed on the way out rather than in the model.**
+Over-declaring $h_t$ looks pointless — each declared hit costs 4 points — but transfer
+banking spends $u_t - h_t$, so declaring a transfer paid un-spends a free transfer and
+rolls it forward. A $-4$ buys a banked free transfer, which saves at most one future
+$-4$: exactly break-even. So the phantom plan ties with the honest one on objective
+value *and carries the same total hit count*, just placed in different gameweeks. Two
+consequences follow:
 
-$$
-h_t \leq M \cdot z_t + M \cdot w_t
-$$
+1. No objective tie-break can rule it out. An $\epsilon$ per declared hit was tried and
+   does not work — the counts are equal, so a per-hit cost sees no difference.
+2. Nothing is lost by fixing it after the solve. The schedule CBC picked is still
+   optimal, and replaying it with free transfers spent first yields the same total
+   hits, so only their attribution changes.
 
-$z_t = 1$ forces $h_t = u_t - A_t$ (with $h_t \geq 0$ requiring $u_t \geq A_t$);
-$z_t = 0$ forces $h_t = 0$ (with $h_t \geq u_t - A_t$ requiring $u_t \leq A_t$).
+Pinning $h_t$ in the model *does* work — a per-gameweek indicator $z_t$ with
+$h_t \leq u_t - A_t + M(1 - z_t) + M w_t$ and $h_t \leq M z_t + M w_t$ — but it costs
+one binary per gameweek, and at horizon 19 that is enough to push CBC past the
+feasibility-pump cliff described below: scenarios start returning INFEASIBLE and jobs
+die with `No feasible solution found`. Measured on the real GW1–19 request that
+exposed this, at the 90s per-scenario limit, the pinned model solved on one attempt
+and failed the next; the rebuild solves it in ~178s, 3 runs for 3, with the MILP left
+byte-identical to its long-tested shape. Correctness that costs reliability here is a
+bad trade, because the failure mode is a dead job rather than a slightly worse plan.
 
-**Why this has to be structural rather than a cost.** Without the pin, the model can
-*over-declare* $h_t$. That looks pointless — each declared hit costs 4 points — but
-transfer banking spends $u_t - h_t$, so declaring a transfer paid un-spends a free
-transfer and rolls it forward. A $-4$ buys a banked free transfer, which saves at
-most one future $-4$: exactly break-even. The phantom plan therefore ties with the
-honest one on objective value *and carries the same total hit count*, just placed in
-different gameweeks, so CBC returns whichever vertex it reaches first and no
-objective tie-break (an $\epsilon$ per hit, say) can distinguish them. It has to be
-infeasible.
+Observed in the wild: a GW1–19 plan that charged $-4$ in GW12 and GW13 while holding a
+free transfer in each, to bank four transfers for a GW16 that then looked free. The
+totals were right ($-28$ either way) but the plan was not executable as printed — FPL
+applies free transfers first and gives you no way to decline one, so following it
+leaves you short of the transfers the later gameweeks assume.
 
-Observed in the wild before the fix: a GW1–19 plan that charged $-4$ in GW12 and GW13
-while holding a free transfer in each, to bank four transfers for a GW16 that then
-looked free. The totals were right ($-28$ either way) but the plan was not executable
-— FPL applies free transfers first and gives you no way to decline one, so following
-it leaves you short of the transfers the later gameweeks assume.
-
-Regression test: `tests/test_transfer_penalty.py`.
+Regression tests: `tests/test_transfer_penalty.py`.
 
 #### Blank Gameweek (BGW) Handling
 

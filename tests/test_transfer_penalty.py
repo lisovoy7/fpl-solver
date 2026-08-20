@@ -5,11 +5,11 @@ gameweek with a free transfer spare is not executable: follow it and FPL applies
 the free transfer anyway, leaving you with fewer banked transfers than the rest
 of the plan assumes.
 
-The shape costs no points (a -4 buys a banked transfer worth at most one future
--4), so it cannot be ruled out by an objective tie-break — the phantom plan
-carries the same hit count as the honest one, just placed differently. The
-Penalty_Exact_When_Needed / Penalty_Zero_When_Covered constraints make it
-infeasible instead, and that is what is under test here.
+The MILP can still produce that shape internally — `penalty_transfers` is bounded
+below by (u - A) but not pinned to it, and over-declaring is exactly break-even, so
+no objective tie-break sees it. Pinning it in the model costs a binary per gameweek
+and pushes horizon-19 solves past CBC's feasibility-pump cliff (TECHNICAL.md), so
+`extract_solution()` rebuilds the ledger instead. These tests cover that rebuild.
 
 Runnable directly (``python tests/test_transfer_penalty.py``) or under pytest.
 """
@@ -22,7 +22,7 @@ import pulp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fpl.solver import TRANSFER_PENALTY_POINTS, FPLSolver  # noqa: E402
+from fpl.solver import MAX_FREE_TRANSFERS, FPLSolver  # noqa: E402
 
 # Per-gameweek transfer counts and chip placement from dev solver job
 # 6b66353a-7fd9-4a4d-ae91-c0af9e31fb78 (team 555, GW1-19), the run that came back
@@ -33,12 +33,30 @@ WILDCARD_GW = 2
 INITIAL_TRANSFERS = 1
 
 
-def _build():
-    """Build the real banking/penalty constraint set with transfer counts pinned.
+def _honest_ledger(transfers_used, initial, free_hit_gw, wildcard_gw):
+    """Independent reimplementation of the rule, to check the solver's against."""
+    available = initial
+    rows = []
+    for gw, used in enumerate(transfers_used, start=1):
+        if gw in (free_hit_gw, wildcard_gw):
+            rows.append((gw, used, available, 0))
+            continue
+        paid = max(0, used - available)
+        rows.append((gw, used, available, paid))
+        available = min(MAX_FREE_TRANSFERS, available - min(used, available) + 1)
+    return rows
+
+
+def _solved_solver(phantom_gw=None):
+    """Solve the real banking/penalty model with transfer counts pinned.
 
     Scoring is stubbed: the squad-value half of the objective is irrelevant to how
     free transfers are accounted for, and stubbing it keeps the test free of player
-    and prediction fixtures. The constraints and penalty constant are the real ones.
+    and prediction fixtures. The constraints are the real ones, and so is
+    extract_solution()'s ledger rebuild.
+
+    phantom_gw forces an over-declared hit in that gameweek — the shape the MILP is
+    free to produce — so the rebuild can be checked against it.
     """
     solver = FPLSolver(
         planning_horizon=len(TRANSFERS_USED),
@@ -50,6 +68,7 @@ def _build():
     # create_decision_variables() only reads the 'element' column; one player is
     # enough because no squad-composition constraints are added here.
     solver.players = pd.DataFrame({'element': [1]})
+    solver.initial_squad = [1]
     solver.initial_transfers = INITIAL_TRANSFERS
     solver.create_decision_variables()
 
@@ -60,73 +79,72 @@ def _build():
     for t, used in enumerate(TRANSFERS_USED, start=1):
         solver.prob += (solver.variables['u'][t] == used, f"Pin_Transfers_{t}")
 
+    if phantom_gw is not None:
+        solver.prob += (
+            solver.variables['penalty_transfers'][phantom_gw] >= 1,
+            f"Force_Phantom_{phantom_gw}",
+        )
+
     solver.prob += pulp.lpSum(
-        TRANSFER_PENALTY_POINTS * solver.variables['penalty_transfers'][t]
+        -4 * solver.variables['penalty_transfers'][t]
         for t in range(1, len(TRANSFERS_USED) + 1)
     )
+    solver.prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    assert pulp.LpStatus[solver.prob.status] == "Optimal", pulp.LpStatus[solver.prob.status]
     return solver
 
 
-def _solve(solver):
-    solver.prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    return pulp.LpStatus[solver.prob.status]
-
-
-def _phantom_hits(solver):
-    """Hits charged beyond what the free-transfer balance made unavoidable."""
-    phantom = {}
-    for t, used in enumerate(TRANSFERS_USED, start=1):
-        if round(solver.variables['wildcard'][t].varValue) == 1:
-            continue
-        if (solver.start_gw + t - 1) in solver.free_hit_gws:
-            continue
-        available = round(solver.variables['A'][t].varValue)
-        charged = round(solver.variables['penalty_transfers'][t].varValue)
-        excess = charged - max(0, used - available)
-        if excess > 0:
-            phantom[solver.start_gw + t - 1] = excess
-    return phantom
-
-
-def test_free_transfers_are_spent_before_hits():
-    """The optimum never charges a hit while a free transfer is available."""
-    solver = _build()
-    status = _solve(solver)
-    assert status == "Optimal", status
-    phantom = _phantom_hits(solver)
-    assert not phantom, f"hits charged with a free transfer spare in GW(s): {phantom}"
-
-
-def test_phantom_hit_is_infeasible():
-    """Charging a hit with a free transfer in hand is ruled out, not just costed.
-
-    The phantom plan ties with the honest one on points, so this has to be
-    infeasibility — a cheaper objective tie-break would leave CBC free to return
-    either shape.
-    """
-    solver = _build()
-    # GW12 in the real run: one transfer made, one free transfer available, and a
-    # -4 charged anyway. Pin that situation and the model must reject it.
-    solver.prob += (solver.variables['A'][12] == 1, "Free_Transfer_Available_GW12")
-    solver.prob += (solver.variables['penalty_transfers'][12] >= 1, "Force_Phantom_GW12")
-    status = _solve(solver)
-
-    assert status == "Infeasible", f"expected Infeasible, got {status}"
-
-
-def test_honest_plan_still_costs_the_same_hits():
-    """The fix relocates hits, it does not add them.
-
-    The phantom and honest shapes were break-even, so the run this regressed from
-    should still total the same number of paid transfers.
-    """
-    solver = _build()
-    status = _solve(solver)
-    assert status == "Optimal", status
-    total = sum(
-        round(solver.variables['penalty_transfers'][t].varValue)
+def _reported(solver):
+    """The per-gameweek ledger as extract_solution() reports it."""
+    solution = solver.extract_solution()
+    return [
+        (t, solution['transfers'][t]['count'],
+         solution['transfers'][t]['available_transfers'],
+         solution['transfers'][t]['paid_transfers'])
         for t in range(1, len(TRANSFERS_USED) + 1)
+    ]
+
+
+def test_reported_ledger_spends_free_transfers_first():
+    """No gameweek is reported as paying a hit while holding a free transfer."""
+    reported = _reported(_solved_solver())
+    offenders = {
+        gw: (used, available, paid)
+        for gw, used, available, paid in reported
+        if gw not in (FREE_HIT_GW, WILDCARD_GW) and paid > max(0, used - available)
+    }
+    assert not offenders, f"hits reported with a free transfer spare: {offenders}"
+
+
+def test_reported_ledger_matches_the_rule():
+    """The rebuild agrees with an independent implementation of FPL's rule."""
+    assert _reported(_solved_solver()) == _honest_ledger(
+        TRANSFERS_USED, INITIAL_TRANSFERS, FREE_HIT_GW, WILDCARD_GW
     )
+
+
+def test_rebuild_survives_a_phantom_solve():
+    """An over-declared hit inside the MILP is not carried into the report.
+
+    GW12 in the real run: one transfer made, one free transfer available, a -4
+    charged anyway. The model still permits that internally, so this forces it and
+    checks the reported ledger comes out honest regardless.
+    """
+    solver = _solved_solver(phantom_gw=12)
+    assert int(solver.variables['penalty_transfers'][12].varValue) >= 1, (
+        "expected the forced phantom to be present in the raw solution"
+    )
+    reported = dict((gw, (used, avail, paid)) for gw, used, avail, paid in _reported(solver))
+    used, available, paid = reported[12]
+    assert paid == max(0, used - available) == 0, (
+        f"phantom leaked into the report for GW12: used={used}, available={available}, paid={paid}"
+    )
+
+
+def test_total_hits_are_unchanged_by_the_rebuild():
+    """The rebuild relocates hits, it does not add or remove them."""
+    reported = _reported(_solved_solver())
+    total = sum(paid for _, _, _, paid in reported)
     assert total == 7, f"expected 7 paid transfers over GW1-19, got {total}"
 
 

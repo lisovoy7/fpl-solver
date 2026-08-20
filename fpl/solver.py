@@ -347,8 +347,6 @@ class FPLSolver:
             cat='Integer',
         )
         variables['wildcard'] = pulp.LpVariable.dicts("wildcard", gameweeks, cat='Binary')
-        # Selects which branch of penalty_transfers = max(0, u - A) applies.
-        variables['hits_needed'] = pulp.LpVariable.dicts("hits_needed", gameweeks, cat='Binary')
 
         self.variables = variables
         logger.debug("Created all decision variables")
@@ -862,30 +860,6 @@ class FPLSolver:
                 f"Penalty_Wildcard_Zero_{t}",
             )
 
-            # Pin penalty_transfers to exactly max(0, u - A); hits_needed picks the
-            # branch and the lower bounds above force the two cases to agree. The
-            # bounds alone leave it free to exceed max(0, u - A), and
-            # add_transfer_banking_constraints() banks A[t+1] off `u -
-            # penalty_transfers`, so over-declaring a hit un-spends a free transfer
-            # and rolls it forward — charging -4 in a gameweek that had a free
-            # transfer spare, which FPL will not do. It has to be infeasible rather
-            # than merely costly: the trade is break-even (a -4 buys a banked
-            # transfer worth at most one future -4) and the phantom plan carries the
-            # same hit count as the honest one, so no objective tie-break sees it.
-            self.prob += (
-                self.variables['penalty_transfers'][t]
-                <= self.variables['u'][t] - self.variables['A'][t]
-                + M_transfers * (1 - self.variables['hits_needed'][t])
-                + M_transfers * self.variables['wildcard'][t],
-                f"Penalty_Exact_When_Needed_{t}",
-            )
-            self.prob += (
-                self.variables['penalty_transfers'][t]
-                <= M_transfers * self.variables['hits_needed'][t]
-                + M_transfers * self.variables['wildcard'][t],
-                f"Penalty_Zero_When_Covered_{t}",
-            )
-
         for t in gameweeks:
             self.prob += (
                 self.variables['first_gw_penalty_transfers'][t] <= self.variables['u'][t],
@@ -1020,20 +994,44 @@ class FPLSolver:
             if captain:
                 solution['captains'][t] = captain[0]
 
+        # Replay the free-transfer ledger, spending free transfers before taking hits.
+        #
+        # The MILP bounds penalty_transfers below by (u - A) but never pins it there, and
+        # add_transfer_banking_constraints() banks A[t+1] off `u - penalty_transfers` — so
+        # a solve can over-declare a hit to un-spend a free transfer and roll it forward,
+        # reporting -4 in a gameweek that had a transfer spare. FPL applies free transfers
+        # first and gives you no way to decline one, so such a plan is not executable as
+        # printed. Pinning penalty_transfers in the model needs an indicator per gameweek,
+        # and at horizon 19 those extra binaries push CBC past the feasibility-pump cliff
+        # described in TECHNICAL.md (scenarios come back INFEASIBLE and the job dies), so
+        # the ledger is rebuilt here instead.
+        #
+        # This loses nothing. Over-declaring is exactly break-even — a -4 buys a banked
+        # transfer worth at most one future -4 — so the schedule the solver picked is
+        # still optimal, and replaying it honestly yields the same total hits. Only the
+        # gameweeks they are attributed to change.
+        honest_available = {}
+        honest_paid = {}
+        available = self.initial_transfers
+        for t in gameweeks:
+            honest_available[t] = available
+            used = int(self.variables['u'][t].varValue)
+            if self.variables['wildcard'][t].varValue == 1 or (self.start_gw + t - 1) in self.free_hit_gws:
+                # Both chips make the gameweek's transfers free and leave the balance
+                # untouched, matching Transfer_Banking_Wildcard_* / FreeHit_Transfer_Preserve.
+                honest_paid[t] = 0
+                continue
+            honest_paid[t] = max(0, used - available)
+            available = min(MAX_FREE_TRANSFERS, available - min(used, available) + 1)
+
         for t in gameweeks:
             transfers_in = [p for p in players if self.variables['s'][(p, t)].varValue == 1]
             transfers_out = [p for p in players if self.variables['r'][(p, t)].varValue == 1]
             transfers_used = int(self.variables['u'][t].varValue)
-            free_transfers_available = int(self.variables['A'][t].varValue)
+            free_transfers_available = honest_available[t]
             wildcard_active = self.variables['wildcard'][t].varValue == 1
-            penalty_transfers_count = int(self.variables['penalty_transfers'][t].varValue)
-
-            if wildcard_active:
-                free_transfers = transfers_used
-                paid_transfers = 0
-            else:
-                paid_transfers = penalty_transfers_count
-                free_transfers = transfers_used - paid_transfers
+            paid_transfers = honest_paid[t]
+            free_transfers = transfers_used - paid_transfers
 
             solution['transfers'][t] = {
                 'in': transfers_in,
