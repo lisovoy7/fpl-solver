@@ -20,6 +20,7 @@ Detailed internals of the fpl-solver prediction engine and MILP decision engine.
   - [Chip Handling](#chip-handling)
   - [Free Hit Sub-Problem](#free-hit-sub-problem)
   - [Chip Scenario Enumeration](#chip-scenario-enumeration)
+  - [Rejected: Endogenous Free Hit](#rejected-endogenous-free-hit)
 - [End-to-End Pipeline](#end-to-end-pipeline)
 
 ---
@@ -311,6 +312,38 @@ $$
 
 The third constraint ensures $h_t = 0$ when Wildcard is active (all transfers are free during WC).
 
+Those three bound $h_t$ from below but do not *pin* it, so two more are needed, with
+a per-gameweek indicator $z_t \in \{0,1\}$ ("hits needed"):
+
+$$
+h_t \leq u_t - A_t + M \cdot (1 - z_t) + M \cdot w_t
+$$
+
+$$
+h_t \leq M \cdot z_t + M \cdot w_t
+$$
+
+$z_t = 1$ forces $h_t = u_t - A_t$ (with $h_t \geq 0$ requiring $u_t \geq A_t$);
+$z_t = 0$ forces $h_t = 0$ (with $h_t \geq u_t - A_t$ requiring $u_t \leq A_t$).
+
+**Why this has to be structural rather than a cost.** Without the pin, the model can
+*over-declare* $h_t$. That looks pointless — each declared hit costs 4 points — but
+transfer banking spends $u_t - h_t$, so declaring a transfer paid un-spends a free
+transfer and rolls it forward. A $-4$ buys a banked free transfer, which saves at
+most one future $-4$: exactly break-even. The phantom plan therefore ties with the
+honest one on objective value *and carries the same total hit count*, just placed in
+different gameweeks, so CBC returns whichever vertex it reaches first and no
+objective tie-break (an $\epsilon$ per hit, say) can distinguish them. It has to be
+infeasible.
+
+Observed in the wild before the fix: a GW1–19 plan that charged $-4$ in GW12 and GW13
+while holding a free transfer in each, to bank four transfers for a GW16 that then
+looked free. The totals were right ($-28$ either way) but the plan was not executable
+— FPL applies free transfers first and gives you no way to decline one, so following
+it leaves you short of the transfers the later gameweeks assume.
+
+Regression test: `tests/test_transfer_penalty.py`.
+
 #### Blank Gameweek (BGW) Handling
 
 Players with no fixture in a GW (no entry in `expected_points`) are prevented from starting or being captain:
@@ -395,6 +428,31 @@ Each scenario is solved independently by the main MILP solver. The scenario with
 
 **Complexity control:** The `max_scenarios` config param (default: 100) caps the number of scenarios tested — mostly a backstop now that BB/TC deferral keeps the FH-only scenario count small (roughly linear in horizon, not quadratic) in the common case.
 
+### Rejected: Endogenous Free Hit
+
+Spiked and reverted — not in the codebase. Recorded so the idea isn't tried again without knowing why it lost.
+
+The premise: Free Hit doesn't strictly need to be enumerated. `calculate_optimal_free_hit_squad()` builds its squad from scratch against the full budget and never reads the current squad or any main-solver decision, so the benefit of playing Free Hit in GW *g* is a **constant** — "which GW gets it" is a plain linear term with fixed coefficients. Adding a binary `fh[t]` per GW with objective coefficient `fh_benefit[gw]`, and rewriting every FH-conditioned constraint (points override, squad freeze, transfer banking, budget relaxation, lineup/captain collapse, chip conflicts) as a function of `fh[t]` instead of a pinned scenario, is therefore an **exact reformulation**, not an approximation like the Bench Boost heuristic above. That part checked out: verified to 4 decimal places against a full placement sweep on a synthetic 6-GW instance (both picked the same GW, objectives agreed to 0.0000).
+
+It was rejected on latency, not correctness. Measured on a synthetic 6-GW / 120-player instance, solving to proven optimality:
+
+| Model | Root LP | MIP | Root gap | Time |
+| --- | --- | --- | --- | --- |
+| Pinned, FH = none | 512.07 | 500.34 | 2.35% | 9.5s |
+| Pinned, FH = GW15 | 520.29 | 510.53 | 2.31% | 3.4s |
+| Endogenous | 562.08 | 510.53 | **10.10%** | 98.6s |
+
+Seven pinned solves covering every placement took 41.7s *sequentially*; the single endogenous solve took 91.3s, and unlike the sweep it cannot be spread across a worker pool at all — it's one MILP. The cause is the root gap: a fractional `fh[t]` collects the Free Hit benefit in proportion while the lineup-size row (`Σy = 11·(1−fh[t])`) only sheds *marginal* starters, so the LP relaxation buys a bound it can never reach.
+
+Two tightenings were tried against that gap and both failed to move it meaningfully:
+
+- **Per-player `y[p,t] ≤ 1−fh[t]`** (forcing a fractional Free Hit to spread its lost starters instead of concentrating them on the cheapest): moved the bound 564.12 → 563.81 against a 53.6-point gap, for 720 extra rows.
+- **Tightening the budget big-M** on the relaxed budget row from a hand-picked constant to the exact `Σ(15 dearest players) − budget`: moved the bound 564.12 → 562.08 — the correct number, but not the lever.
+
+The gap gets worse, not better, at longer horizons — the opposite of what would be needed for this to eventually pay off. At 10 GWs / 200 players (11 sweep scenarios vs. 1 endogenous solve, both capped at a few minutes per scenario): the sweep finished all 11 within its per-scenario limit and found 885.41; the endogenous solve hit its time limit still short of proven-optimal and returned 883.44 — 2 points *worse* than the sweep despite spending comparable total wall-clock on one tree instead of eleven.
+
+The one property that argued *for* this approach, and the reason it's worth someone revisiting if the tradeoffs change: graceful degradation under a time limit. The endogenous model returns the best incumbent it found **across all placements**, whereas the sweep drops whole placements it can't finish inside `time_limit_per_scenario` (see the coverage table above — 17 of 20 dropped at 60s). If a future run becomes limited by scenarios silently going INFEASIBLE rather than by total wall-clock, this formulation would fail softly where the sweep doesn't — but at the horizons currently in use, CBC's single-tree performance loses to independent parallel solves badly enough that this doesn't pay for itself. A CBC → HiGHS swap was not tested and could change the calculus; worth trying that before resurrecting this.
+
 ### Post-Hoc Bench Boost / Triple Captain Placement
 
 **Module:** `fpl/free_hit.py` — `find_best_bench_boost_gw()`, `find_best_triple_captain_gw()`
@@ -439,6 +497,26 @@ The full pipeline executed by `python run.py`:
 | Total (10-GW horizon, all chips available, 3 workers) | ~1.5 minutes — 11 FH-only scenarios (BB/TC deferred, not enumerated) plus up to `chip_reselect_candidates` re-solves. Measured trade-off vs. full FH×BB enumeration: ~0.5% fewer points (637.4 → 634.0) for a ~5.8x speedup (517s → 89s) |
 
 The solver uses the **CBC** (Coin-or Branch and Cut) solver, which is open-source and bundled with PuLP. No external solver installation required. For faster solves, GUROBI can be used by changing `solver_name` (requires a separate license).
+
+### Why the time limit can't just be lowered
+
+`time_limit_per_scenario` behaves like a quality knob at short horizons and like a **coverage** knob at long ones, and the second is far less forgiving.
+
+CBC reports `LpStatusOptimal` both for a proven optimum and for a time-limited incumbent, so a solve that runs out of time normally returns its best find so far. At horizon 19 (~55k binaries) that stops being true: CBC's feasibility pump often finds *no* integer-feasible point at all, so there is no incumbent to return, the scenario is dropped, and the search silently narrows. If every scenario is dropped the job fails outright with `No feasible solution found`.
+
+Measured end-to-end on Cloud Run (horizon 19, all four chips available, 6 workers, 8 vCPU):
+
+| stage-1 limit | scenarios dropped | objective | wall clock |
+|---|---|---|---|
+| 90s | 0 / 20 | 1187.0 | 386s |
+| 60s | 17 / 20 | 1187.0 | 267s |
+| 15s | 20 / 20 | job failed | — |
+
+The 60s row is the trap: it returned the correct plan having actually evaluated only three Free Hit placements, because the winner happened to survive. The same config dropped only 4 of 25 on a different day, so the failure rate is not even stable. Treat a non-zero INFEASIBLE count in the logs as lost coverage, not noise.
+
+**A warm start does not fix this** — implemented, measured, rejected. Seeding CBC with a trivially feasible plan (hold the squad, no transfers, no chips) works mechanically (`MIPStart values read for 54530 variables`) but anchors the search to the do-nothing neighbourhood: the full pipeline scored **1130.5 seeded vs 1187.0 unseeded** at the same 90s limit, and the seeded plan dropped the wildcard entirely. Cut generation also has to be disabled for a seeded solve to branch at all, costing further quality. And it does not rescue short limits anyway: CBC applies a MIPStart only after the MPS parse, presolve and root LP — past 15s on a shared vCPU — so a 15s limit still dropped every scenario with the seed present and unread.
+
+The way to make this faster is a smaller model (shorter horizon, tighter watchlist), not a shorter limit or a cleverer start.
 
 ### Scenario Parallelism
 

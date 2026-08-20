@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
@@ -106,17 +106,37 @@ class NonPlayingEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class ForcedLineupEntry(BaseModel):
+    """One player who must be in the starting XI for a set of gameweeks. Mirrors the
+    `forced_lineup` shape in config.yaml, same as NonPlayingEntry does for non_playing.
+
+    An entry with no gameweeks is dropped rather than treated as "every gameweek" —
+    forcing a start across a whole horizon is a constraint nobody asks for by accident,
+    so it has to be spelled out gameweek by gameweek."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
 class OptimizeRequest(BaseModel):
     """Input payload for the /api/optimize endpoint."""
     team_id: int
-    free_transfers: int = Field(ge=1, le=5)
+    # 0 is legitimate, not a degenerate input: a manager who has already spent this
+    # week's transfer is planning from zero, and any transfer the plan makes in the first
+    # gameweek should cost 4 points. The MILP already models it — `A` (transfers_available)
+    # is declared lowBound=0 in fpl/solver.py — so only this validator was rejecting it.
+    free_transfers: int = Field(ge=0, le=5)
     # 19 = the chip half-season boundary (GW1-19 vs GW20-38, see CHIP_WINDOWS in
     # fpl/free_hit.py) — the default and ceiling both reach exactly that far from
     # a GW1 start. horizon = min(planning_horizon, 38 - current_gw + 1) below still
     # clamps to whatever's actually left in the season later on.
     planning_horizon: int = Field(default=19, ge=1, le=19)
     use_chips: bool = True
-    forced_lineup: list[int] = Field(default_factory=list)
+    # Per-gameweek, matching config.yaml. This was a flat list[int] that got expanded to
+    # `range(current_gw, current_gw + horizon)` — i.e. the API could only ever say "start
+    # this player in EVERY gameweek of the plan", which at the default horizon of 19 is a
+    # near-certain infeasibility and never what "start Palmer in GW27" meant. The solver
+    # itself always took (player, [gws]) tuples; only this layer flattened them away.
+    forced_lineup: list[ForcedLineupEntry] = Field(default_factory=list)
     excluded_players: list[int] = Field(default_factory=list)
     # Zero out these players' points for the listed GWs (injury/suspension/rotation).
     # Note: `excluded_players` still wins over `extra_players` — create_watchlist drops
@@ -401,13 +421,54 @@ def _update_job(job_id: str, status: str, result: Any = None, error: str | None 
         logger.exception("Failed to update solver_jobs for job %s: %s", job_id, exc)
 
 
+# Floor on the gap between two progress writes. A 25-scenario run finishing in a burst
+# would otherwise fire 25 updates in a few seconds, and the frontend polls every 5s —
+# so it could not see them anyway. Phase changes ignore this and always write: they are
+# rare, and they are the part of the bar that tells the user what is happening.
+_PROGRESS_MIN_INTERVAL_S = 2.0
+
+
+def _progress_writer(job_id: str):
+    """
+    Build the callback that turns solve progress into a `solver_jobs.progress` row.
+
+    Deliberately fire-and-forget and swallowing: a solve is minutes long and a failed
+    progress write is not a reason to lose it. The frontend treats a missing or stale
+    progress value as "no signal", not as an error, and falls back to easing the bar on
+    elapsed time — so the worst case of this never working is the old spinner.
+    """
+    state = {"at": 0.0, "phase": ""}
+
+    def report(phase: str, done: int | None = None, total: int | None = None) -> None:
+        if not _supabase:
+            return
+        now = time.monotonic()
+        if phase == state["phase"] and now - state["at"] < _PROGRESS_MIN_INTERVAL_S:
+            return
+        state["at"] = now
+        state["phase"] = phase
+        payload: dict[str, Any] = {"phase": phase}
+        if done is not None and total is not None:
+            payload.update({"done": done, "total": total})
+        try:
+            # "now()" is Postgres's own clock, same as every other write here — which is
+            # also what the frontend's staleness check compares against.
+            _supabase.table("solver_jobs").update(
+                {"progress": payload, "updated_at": "now()"}
+            ).eq("id", job_id).execute()
+        except Exception:
+            logger.debug("Progress write failed for job %s", job_id, exc_info=True)
+
+    return report
+
+
 def _run_and_store(req: OptimizeRequest, job_id: str) -> None:
     """Background task: run optimize pipeline and persist result to Supabase."""
     _update_job(job_id, "running")
     try:
         # Reuse the synchronous optimize logic by calling it inline
         import asyncio
-        result = asyncio.run(_optimize_inner(req))
+        result = asyncio.run(_optimize_inner(req, on_progress=_progress_writer(job_id)))
         _update_job(job_id, "complete", result=result)
         logger.info("Async job %s complete — %.1f pts", job_id, result.get("objective", 0))
     except Exception as exc:
@@ -415,9 +476,20 @@ def _run_and_store(req: OptimizeRequest, job_id: str) -> None:
         _update_job(job_id, "failed", error=str(exc))
 
 
-async def _optimize_inner(req: OptimizeRequest) -> dict:
+# What a run reports as it goes. Only two of the four can count anything — the others
+# are setup and teardown with no natural unit of work — which is why the frontend pairs
+# these checkpoints with time-based easing rather than driving the bar from them alone.
+ProgressFn = Callable[..., None]
+
+
+def _noop_progress(phase: str, done: int | None = None, total: int | None = None) -> None:
+    """Progress sink for the synchronous endpoint, which has nobody to report to."""
+
+
+async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_progress) -> dict:
     """Pure optimization logic shared by /api/optimize and /api/optimize-async."""
     start_time = time.time()
+    on_progress("preparing")
 
     bootstrap = api.fetch_bootstrap_data()
     detected_gw = api.detect_current_gw(bootstrap)
@@ -472,7 +544,15 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
 
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
-    must_include = list(dict.fromkeys(list(current_squad) + list(req.extra_players)))
+    # forced_lineup players are promoted too, mirroring run.py: a forced start is only
+    # enforceable if the player is in the candidate pool at all, so without this the
+    # constraint is silently dropped for anyone who didn't clear min_hist_pct — the
+    # caller's instruction disappears with no error and a plausible plan comes back.
+    must_include = list(dict.fromkeys(
+        list(current_squad)
+        + list(req.extra_players)
+        + [e.player for e in req.forced_lineup]
+    ))
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else 0.6
@@ -535,14 +615,14 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
     if len(chip_scenarios) > req.max_scenarios:
         chip_scenarios = chip_scenarios[:req.max_scenarios]
 
-    forced_lineup_tuples = [(pid, list(range(current_gw, current_gw + horizon))) for pid in req.forced_lineup]
+    forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
         fh_benefits = calculate_free_hit_benefits_for_horizon(
             start_gw=current_gw, planning_horizon=horizon, budget=total_budget,
             predictions_df=predictions, gw_data_df=gw_data,
             watchlist_players=watchlist,
-            forced_lineup_players=forced_lineup_tuples if req.forced_lineup else None,
+            forced_lineup_players=forced_lineup_tuples,
             non_playing_players=non_playing_tuples,
         )
 
@@ -556,7 +636,7 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
         "budget": total_budget,
         "start_gw": current_gw,
         "points_multiplier": None,
-        "forced_lineup": forced_lineup_tuples if req.forced_lineup else None,
+        "forced_lineup": forced_lineup_tuples,
         "non_playing": non_playing_tuples,
         "first_gw_penalty": -1,
         "sub_probability": 0.10,
@@ -571,7 +651,14 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
         "mip_gap": None,
     }
 
-    raw_results = solve_scenarios(chip_scenarios, solver_ctx)
+    # Announced before the first solve returns, not after: everything above this point
+    # (bootstrap, predictions, watchlist, free-hit benefits) is a silent minute or so,
+    # and the phase change is what tells the user it ended.
+    on_progress("scenarios", 0, len(chip_scenarios))
+    raw_results = solve_scenarios(
+        chip_scenarios, solver_ctx,
+        on_progress=lambda done, total: on_progress("scenarios", done, total),
+    )
 
     for raw in raw_results:
         if raw["status"] != "solved":
@@ -686,7 +773,11 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
                 "force_wildcard_gw": req.force_wildcard_gw,
             })
 
-        for raw in solve_scenarios(final_scenarios, solver_ctx):
+        on_progress("chip_resolve", 0, len(final_scenarios))
+        for raw in solve_scenarios(
+            final_scenarios, solver_ctx,
+            on_progress=lambda done, total: on_progress("chip_resolve", done, total),
+        ):
             if raw["status"] != "solved":
                 continue
             scenario = raw["scenario"]
@@ -702,6 +793,8 @@ async def _optimize_inner(req: OptimizeRequest) -> dict:
 
     if not best_result:
         raise ValueError("No feasible solution found")
+
+    on_progress("finalising")
 
     # Workers return plain data, not solver objects; rebuild the winner's solver
     # (~0.2s, no solve) for the fields _format_solution reads.
