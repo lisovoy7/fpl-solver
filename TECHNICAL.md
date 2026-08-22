@@ -261,8 +261,37 @@ $$
 Every GW must maintain:
 - Exactly 15 players total
 - Exactly 2 GK, 5 DEF, 5 MID, 3 FWD
-- At most 3 players from any single club
+- At most 3 players from any single club — but see the grandfathering rule below
 - Total squad value ≤ budget
+
+##### Grandfathered per-club excess
+
+FPL enforces the three-per-club limit **at transfer time, not continuously**. When a
+player you already own moves to a club you hold three of, you keep all four for as long
+as you leave the squad alone. So the initial squad handed to the solver can legitimately
+be over the limit, and the rule is conditional:
+
+$$\sum_{p \in C} x_{p,t} + e_C \cdot s_{p,t} \leq 3 + e_C \qquad \forall p, \; \forall t$$
+
+where $e_C = \max(0, |\{p \in C : p \in \text{initial squad}\}| - 3)$ is a **constant**.
+Any transfer in gameweek $t$ ($s_{p,t} = 1$ for some $p$) forces that gameweek's squad
+back to $\leq 3$; a gameweek with no transfers may carry the excess. A wildcard is just
+a large number of transfers, so it is covered by the same rows. A Free Hit is not —
+`s` and `r` are pinned to zero for a FH gameweek, so the held squad passes through
+untouched, and the temp FH squad is a separate MILP that is built compliant from scratch.
+
+Two things about the shape of this, both deliberate:
+
+- **One row per player, not one aggregate row per gameweek.** Written once against the
+  transfer count, $\sum_{p \in C} x_{p,t} + e_C \cdot u_t \leq 3 + e_C$ reads a second
+  transfer as a second unit of tightening and drives the club to two players.
+- **No "did I transfer" binary.** It would express the same rule in $T$ rows instead of
+  $|P| \cdot T$, but extra integer variables at horizon 19 push CBC past the
+  feasibility-pump cliff described under [Runtime Characteristics](#runtime-characteristics)
+   — the mistake that broke prod in `a1879db`. Rows are cheap there; binaries are not.
+
+For a compliant initial squad $e_C = 0$ for every club and none of this is emitted, so
+the model keeps the exact shape it has been solving in production all season.
 
 #### Lineup Selection
 

@@ -558,6 +558,10 @@ class FPLSolver:
         player_position = dict(zip(self.players['element'], self.players['position']))
         player_club = dict(zip(self.players['element'], self.players['team']))
 
+        # Computed from the same player_club map the constraints below use, so the two
+        # can never disagree about which club a player belongs to.
+        club_excess = self._grandfathered_club_excess(player_club)
+
         for t in gameweeks:
             self.prob += (
                 pulp.lpSum([self.variables['x'][(p, t)] for p in players]) == TOTAL_SQUAD_SIZE,
@@ -572,13 +576,84 @@ class FPLSolver:
             clubs = set(player_club.values())
             for club in clubs:
                 club_players = [p for p in players if player_club[p] == club]
-                if club_players:
+                if not club_players:
+                    continue
+
+                held = pulp.lpSum([self.variables['x'][(p, t)] for p in club_players])
+                extra = club_excess.get(club, 0)
+
+                if not extra:
+                    self.prob += (held <= MAX_PLAYERS_PER_CLUB, f"Club_{club}_{t}")
+                    continue
+
+                # A grandfathered over-limit club (see _grandfathered_club_excess): the
+                # squad may carry the excess for as long as it is left alone, but any
+                # transfer in this GW has to land on a fully compliant squad.
+                #
+                # One row per player, rather than one aggregate row, is what keeps this
+                # exact without a new binary. `s[p, t]` is already binary, so each row
+                # independently says "if this transfer happens, the club is capped at
+                # MAX_PLAYERS_PER_CLUB". Writing it once against u[t] instead would
+                # over-restrict: `held + extra * u[t] <= 3 + extra` forces the club down
+                # to two players on a double transfer. And introducing a per-GW "did I
+                # transfer" binary is what broke prod in a1879db — the extra integers
+                # push CBC past its feasibility-pump cliff at horizon 19 and scenarios
+                # come back INFEASIBLE.
+                #
+                # No monotonicity chain is needed to stop the excess reappearing later:
+                # climbing back to 4 requires a transfer in, and that transfer's own row
+                # caps the club at 3.
+                for p in players:
                     self.prob += (
-                        pulp.lpSum([self.variables['x'][(p, t)] for p in club_players]) <= MAX_PLAYERS_PER_CLUB,
-                        f"Club_{club}_{t}",
+                        held + extra * self.variables['s'][(p, t)]
+                        <= MAX_PLAYERS_PER_CLUB + extra,
+                        f"Club_{club}_{t}_Grandfathered_{p}",
                     )
 
         logger.debug("Squad composition constraints added")
+
+    def _grandfathered_club_excess(self, player_club: Dict[int, int]) -> Dict[int, int]:
+        """
+        Clubs the initial squad already breaches the per-club limit for, and by how much.
+
+        FPL applies the three-per-club limit at transfer time, not continuously: when a
+        player you own moves to a club you already hold three of, you keep all four. So a
+        squad handed to us can be legitimately over the limit, and rejecting it is wrong
+        — a real dev job (76711f57, team 124578, four Arsenal players) died with
+        `No feasible solution found` for exactly this reason. Letting the excess survive
+        a transfer would be equally wrong, which is what the caller enforces.
+
+        Returns {club: excess} for over-limit clubs only, so a legal squad leaves the
+        model byte-identical to its long-tested shape.
+        """
+        if not self.initial_squad:
+            return {}
+
+        # `team` arrives as float64 (the join that builds it admits missing values), so
+        # a club can be NaN as well as absent. The caller skips a NaN club anyway — it
+        # matches no player, since NaN != NaN — but counting one here would invent an
+        # excess for a club that does not exist.
+        counts: Dict[int, int] = {}
+        for p in self.initial_squad:
+            club = player_club.get(p)
+            if club is not None and not pd.isna(club):
+                counts[club] = counts.get(club, 0) + 1
+
+        excess = {
+            club: count - MAX_PLAYERS_PER_CLUB
+            for club, count in counts.items()
+            if count > MAX_PLAYERS_PER_CLUB
+        }
+
+        if excess:
+            logger.info(
+                "Initial squad holds more than %d players from club(s) %s — "
+                "grandfathering it; any transfer must restore compliance",
+                MAX_PLAYERS_PER_CLUB,
+                {club: MAX_PLAYERS_PER_CLUB + e for club, e in excess.items()},
+            )
+
+        return excess
 
     def sale_prices(self) -> Dict[int, float]:
         """
