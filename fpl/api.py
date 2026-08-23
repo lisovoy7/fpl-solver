@@ -245,46 +245,30 @@ def _fetch_all_rows(supabase_client: Any, table: str, columns: str = "*", page_s
 def fetch_gameweek_data_from_supabase(
     supabase_client: Any,
     bootstrap_data: Optional[Dict] = None,
-    max_age_hours: float = 24.0,
 ) -> Optional[pd.DataFrame]:
     """
     Read the same per-player-per-fixture history that fetch_gameweek_data()
     fetches (~700-800 element-summary API calls), from Supabase instead —
     fpl-lad's daily cron already syncs player_gw_history there.
 
-    Returns None (caller should fall back to fetch_gameweek_data()) if:
-      - no Supabase client was configured
-      - the table is empty
-      - the newest fetched_at is older than max_age_hours (stale/never synced)
-      - anything about the read fails
+    Supabase is the source of truth for this data. There is deliberately NO
+    freshness check: an age cutoff used to send a whole request down the 15-minute
+    element-summary path on the strength of one timestamp, which is both the slow
+    path this function exists to avoid and a silent switch between two data
+    sources mid-season. If the sync is behind, the fix belongs in the sync — a
+    solve should not quietly re-fetch the league one player at a time.
 
-    This is purely an optional accelerator — nothing about fpl-solver's normal
-    behaviour (CLI, or Cloud Run with no Supabase env vars set) depends on it.
+    Returns None (caller falls back to fetch_gameweek_data()) only when there is
+    genuinely nothing to read: no Supabase client, an empty table, or a failed
+    read.
+
+    Nothing about fpl-solver's CLI behaviour depends on this — run.py does not
+    call it.
     """
     if supabase_client is None:
         return None
 
     try:
-        freshness = (
-            supabase_client.table("player_gw_history")
-            .select("fetched_at")
-            .order("fetched_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not freshness.data:
-            return None
-
-        newest_raw = freshness.data[0]["fetched_at"]
-        newest = datetime.fromisoformat(newest_raw.replace("Z", "+00:00"))
-        age_hours = (datetime.now(timezone.utc) - newest).total_seconds() / 3600
-        if age_hours > max_age_hours:
-            logger.info(
-                "Supabase gw_history is %.1f hours old (limit %.0f) — falling back to live fetch",
-                age_hours, max_age_hours,
-            )
-            return None
-
         gw_history = _fetch_all_rows(supabase_client, "player_gw_history")
         if not gw_history:
             return None
@@ -343,7 +327,7 @@ def fetch_gameweek_data_from_supabase(
             })
 
         df = pd.DataFrame(rows)
-        logger.info("Loaded gw_data from Supabase: %d rows (%.1f hours old)", len(df), age_hours)
+        logger.info("Loaded gw_data from Supabase: %d rows", len(df))
         return df
     except Exception:
         logger.exception("Supabase gw_data read-through failed — falling back to live fetch")
