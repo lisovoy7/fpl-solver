@@ -1082,6 +1082,38 @@ async def generate_predictions_cron(secret: str = Query(...)):
         _supabase.table("player_predictions").upsert(batch, on_conflict="player_id,event").execute()
         written += len(batch)
 
+    # Drop predictions this run did not rewrite. Upserting alone never removes
+    # anything, so every prediction the model can no longer produce survives
+    # forever, timestamped but otherwise indistinguishable from a fresh one —
+    # and Alfie reads this table with no idea which is which. Observed
+    # 2026-08-23: the first real run wrote 4,662 rows for the 126 players with a
+    # 60+ minute appearance and left 17,260 pre-season proxy rows in place,
+    # leaving the table a silent mix of two different models.
+    #
+    # A player with no prediction is the honest state and self-heals as fixtures
+    # are played. Only runs when rows were actually written, so a bad run cannot
+    # empty the table.
+    stale_deleted = 0
+    if written:
+        try:
+            deleted = (
+                _supabase.table("player_predictions")
+                .delete()
+                .lt("generated_at", generated_at)
+                .execute()
+            )
+            stale_deleted = len(deleted.data or [])
+        except Exception:
+            logger.exception("generate-predictions cron: stale row purge failed")
+
     elapsed = round(time.time() - start_time, 1)
-    logger.info("generate-predictions cron: wrote %d rows in %.1fs", written, elapsed)
-    return {"ok": True, "rows_written": written, "elapsed_seconds": elapsed}
+    logger.info(
+        "generate-predictions cron: wrote %d rows, purged %d stale, in %.1fs",
+        written, stale_deleted, elapsed,
+    )
+    return {
+        "ok": True,
+        "rows_written": written,
+        "stale_rows_deleted": stale_deleted,
+        "elapsed_seconds": elapsed,
+    }
