@@ -29,7 +29,7 @@ _DEFAULT_SOLVER = {
     # While this GW's deadline hasn't passed, predictions come from
     # data/proxy_predictions.csv rather than this season's (nonexistent) history.
     # None/0 disables the fallback. See fpl/proxy_predict.py.
-    "points_pred_gw_threshold": 4,
+    "points_pred_gw_threshold": 1,
     "sub_probability": 0.10,
     "first_gw_transfer_penalty": -1,
     "time_limit_per_scenario": 15,

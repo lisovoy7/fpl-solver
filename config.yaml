@@ -40,9 +40,11 @@ solver:
   # (generate_predictions needs 60+ minute appearances, so it yields nothing in
   # GW1). Once the deadline passes, predictions are generated normally.
   # Set to null/0 to always use the normal pipeline.
+  # 2026-08-23: lowered 4 -> 1. GW1 has been played, so this now resolves to
+  # "never use the proxy" — every prediction is generated from real history.
   # NOTE: while active, the min_hist_pct filter is disabled (nobody has played
   # yet) and the proxy model assumes every player starts — check the squad it picks.
-  points_pred_gw_threshold: 4
+  points_pred_gw_threshold: 1
 
   # Fraction of the recent window a player must have started (60+ min) to enter
   # the candidate pool. Lower = more players (less reliable). Higher = fewer

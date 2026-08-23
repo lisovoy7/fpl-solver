@@ -23,7 +23,7 @@ Formulates the entire remaining season as a single Mixed Integer Linear Program 
 
 - **Decision variables**: squad ownership, starting XI, captain, transfers in/out — per player per gameweek
 - **Objective**: maximize total expected points across all gameweeks (with captain bonus, bench value, and transfer penalties)
-- **Constraints**: budget, squad composition (2 GK / 5 DEF / 5 MID / 3 FWD), formation rules (3-5-2, 4-4-2, etc.), max 3 per club, transfer banking (up to 5 free transfers), chip rules
+- **Constraints**: budget, squad composition (2 GK / 5 DEF / 5 MID / 3 FWD), formation rules (3-5-2, 4-4-2, etc.), max 3 per club (enforced at transfer time, as FPL does — a squad that is already over the limit because a player changed clubs may hold it until it next transfers), transfer banking (up to 5 free transfers), chip rules
 - **Chip enumeration**: Wildcard, Free Hit, Bench Boost, and Triple Captain are decomposed into scenarios and solved independently — the best combination wins. All four chips follow the same rule: one allowed per half-season (GW 1-19 and GW 20-38), giving two uses per season
 
 ## Quick Start

@@ -59,6 +59,8 @@ class FPLSolver:
         bench_boost_gw: int = -1,
         triple_captain_gw: int = -1,
         force_wildcard_gw: Optional[int] = None,
+        bank: Optional[float] = None,
+        selling_discounts: Optional[Dict[int, int]] = None,
     ):
         """
         Initialize the FPL solver.
@@ -77,6 +79,11 @@ class FPLSolver:
             bench_boost_gw: Gameweek for Bench Boost chip (-1 = disabled).
             triple_captain_gw: Gameweek for Triple Captain chip (-1 = disabled).
             force_wildcard_gw: Force wildcard on this GW (None = let solver decide).
+            bank: Cash in hand in units (5 = 0.5M). None = derive it from `budget` minus
+                what the initial squad is worth at its own sale prices.
+            selling_discounts: {player_id: units} the manager loses by selling a player
+                they already own, i.e. market price minus FPL selling price. Only players
+                in the initial squad can have one; everyone else sells for what they cost.
         """
         self.T = planning_horizon
         self.budget = budget
@@ -91,6 +98,8 @@ class FPLSolver:
         self.bench_boost_gw = bench_boost_gw
         self.triple_captain_gw = triple_captain_gw
         self.force_wildcard_gw = force_wildcard_gw
+        self.bank = bank
+        self.selling_discounts = selling_discounts or {}
 
         self.players = None
         self.predictions = None
@@ -347,6 +356,17 @@ class FPLSolver:
             cat='Integer',
         )
         variables['wildcard'] = pulp.LpVariable.dicts("wildcard", gameweeks, cat='Binary')
+        # Cash in hand at the end of each gameweek. Continuous and floored at zero, which
+        # is the whole budget rule: every purchase has to be funded out of the bank plus
+        # what that gameweek's sales raised. Continuous rather than integer on purpose —
+        # prices are already whole tenths, so the arithmetic lands on integers anyway and
+        # declaring them integer would only give CBC more to branch on.
+        variables['bank'] = pulp.LpVariable.dicts(
+            "bank",
+            gameweeks,
+            lowBound=0,
+            cat='Continuous',
+        )
 
         self.variables = variables
         logger.debug("Created all decision variables")
@@ -527,37 +547,26 @@ class FPLSolver:
         logger.debug("Transfer banking constraints added")
 
     def add_squad_composition_constraints(self) -> None:
-        """Add squad composition and budget constraints.
+        """Add squad size, positional and per-club constraints.
 
-        Budget constraint is skipped on Free Hit GWs because the real squad is
-        frozen and no money changes hands.  Players may have appreciated above
-        their selling price, making the market-value sum exceed the budget —
-        that is expected and not a real constraint violation.
+        Money is handled separately, by add_budget_constraints().
         """
         logger.debug("Adding squad composition constraints")
 
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
         player_position = dict(zip(self.players['element'], self.players['position']))
-        player_price = dict(zip(self.players['element'], self.players['value']))
         player_club = dict(zip(self.players['element'], self.players['team']))
 
-        fh_internal_gws = {
-            gw - self.start_gw + 1
-            for gw in self.free_hit_gws
-            if 1 <= gw - self.start_gw + 1 <= self.T
-        }
+        # Computed from the same player_club map the constraints below use, so the two
+        # can never disagree about which club a player belongs to.
+        club_excess = self._grandfathered_club_excess(player_club)
 
         for t in gameweeks:
             self.prob += (
                 pulp.lpSum([self.variables['x'][(p, t)] for p in players]) == TOTAL_SQUAD_SIZE,
                 f"Squad_Size_{t}",
             )
-            if t not in fh_internal_gws:
-                self.prob += (
-                    pulp.lpSum([player_price[p] * self.variables['x'][(p, t)] for p in players]) <= self.budget,
-                    f"Budget_{t}",
-                )
             for position, required_count in SQUAD_COMPOSITION.items():
                 position_players = [p for p in players if player_position[p] == position]
                 self.prob += (
@@ -567,13 +576,170 @@ class FPLSolver:
             clubs = set(player_club.values())
             for club in clubs:
                 club_players = [p for p in players if player_club[p] == club]
-                if club_players:
+                if not club_players:
+                    continue
+
+                held = pulp.lpSum([self.variables['x'][(p, t)] for p in club_players])
+                extra = club_excess.get(club, 0)
+
+                if not extra:
+                    self.prob += (held <= MAX_PLAYERS_PER_CLUB, f"Club_{club}_{t}")
+                    continue
+
+                # A grandfathered over-limit club (see _grandfathered_club_excess): the
+                # squad may carry the excess for as long as it is left alone, but any
+                # transfer in this GW has to land on a fully compliant squad.
+                #
+                # One row per player, rather than one aggregate row, is what keeps this
+                # exact without a new binary. `s[p, t]` is already binary, so each row
+                # independently says "if this transfer happens, the club is capped at
+                # MAX_PLAYERS_PER_CLUB". Writing it once against u[t] instead would
+                # over-restrict: `held + extra * u[t] <= 3 + extra` forces the club down
+                # to two players on a double transfer. And introducing a per-GW "did I
+                # transfer" binary is what broke prod in a1879db — the extra integers
+                # push CBC past its feasibility-pump cliff at horizon 19 and scenarios
+                # come back INFEASIBLE.
+                #
+                # No monotonicity chain is needed to stop the excess reappearing later:
+                # climbing back to 4 requires a transfer in, and that transfer's own row
+                # caps the club at 3.
+                for p in players:
                     self.prob += (
-                        pulp.lpSum([self.variables['x'][(p, t)] for p in club_players]) <= MAX_PLAYERS_PER_CLUB,
-                        f"Club_{club}_{t}",
+                        held + extra * self.variables['s'][(p, t)]
+                        <= MAX_PLAYERS_PER_CLUB + extra,
+                        f"Club_{club}_{t}_Grandfathered_{p}",
                     )
 
         logger.debug("Squad composition constraints added")
+
+    def _grandfathered_club_excess(self, player_club: Dict[int, int]) -> Dict[int, int]:
+        """
+        Clubs the initial squad already breaches the per-club limit for, and by how much.
+
+        FPL applies the three-per-club limit at transfer time, not continuously: when a
+        player you own moves to a club you already hold three of, you keep all four. So a
+        squad handed to us can be legitimately over the limit, and rejecting it is wrong
+        — a real dev job (76711f57, team 124578, four Arsenal players) died with
+        `No feasible solution found` for exactly this reason. Letting the excess survive
+        a transfer would be equally wrong, which is what the caller enforces.
+
+        Returns {club: excess} for over-limit clubs only, so a legal squad leaves the
+        model byte-identical to its long-tested shape.
+        """
+        if not self.initial_squad:
+            return {}
+
+        # `team` arrives as float64 (the join that builds it admits missing values), so
+        # a club can be NaN as well as absent. The caller skips a NaN club anyway — it
+        # matches no player, since NaN != NaN — but counting one here would invent an
+        # excess for a club that does not exist.
+        counts: Dict[int, int] = {}
+        for p in self.initial_squad:
+            club = player_club.get(p)
+            if club is not None and not pd.isna(club):
+                counts[club] = counts.get(club, 0) + 1
+
+        excess = {
+            club: count - MAX_PLAYERS_PER_CLUB
+            for club, count in counts.items()
+            if count > MAX_PLAYERS_PER_CLUB
+        }
+
+        if excess:
+            logger.info(
+                "Initial squad holds more than %d players from club(s) %s — "
+                "grandfathering it; any transfer must restore compliance",
+                MAX_PLAYERS_PER_CLUB,
+                {club: MAX_PLAYERS_PER_CLUB + e for club, e in excess.items()},
+            )
+
+        return excess
+
+    def sale_prices(self) -> Dict[int, float]:
+        """
+        What each player raises when sold, in units.
+
+        Everyone sells for their market price except the players the manager already
+        owns, who sell for the FPL selling price — purchase price plus half of any rise.
+        `selling_discounts` carries that shortfall per player.
+
+        Applied on every sale of an owned player, including a sell-then-buy-back-then-sell
+        round trip within the horizon, where strictly it should only apply the first time.
+        Tracking that needs a per-player indicator chain to distinguish the original
+        holding from a re-bought one, and buying a player back at a higher price than he
+        sold for is rarely part of a good plan anyway. Erring on the pessimistic side of
+        a rare case is the cheap trade.
+        """
+        prices = dict(zip(self.players['element'], self.players['value']))
+        return {
+            p: max(0.0, float(price) - float(self.selling_discounts.get(p, 0)))
+            for p, price in prices.items()
+        }
+
+    def opening_bank(self) -> float:
+        """
+        Cash in hand before the first gameweek of the plan, in units.
+
+        Supplied by the caller when known. Otherwise derived from `budget`, which is
+        "what the squad would raise if sold, plus the bank" — so subtracting the sale
+        value of the opening squad leaves the bank.
+        """
+        if self.bank is not None:
+            return max(0.0, float(self.bank))
+
+        sale = self.sale_prices()
+        held = sum(sale.get(p, 0.0) for p in (self.initial_squad or []))
+        derived = float(self.budget) - held
+        if derived < 0:
+            # Only reachable when the caller gave a budget that can't fund its own squad
+            # at the model's prices — a squad/budget pair from different points in time,
+            # or price data that has moved since. Clamping keeps the plan solvable and
+            # simply means no spare cash rather than negative cash.
+            logger.warning(
+                "Derived opening bank was negative (%.1f); clamping to 0", derived / 10
+            )
+            return 0.0
+        return derived
+
+    def add_budget_constraints(self) -> None:
+        """
+        Track cash gameweek by gameweek and never let it go below zero.
+
+        This replaces the old "squad market value <= budget" check, which measured the
+        wrong thing: the budget it compared against was the squad's *selling* value plus
+        the bank, so a squad that had risen in price read as unaffordable to keep, and the
+        model was pushed into selling players purely to balance an arithmetic error.
+
+        Cash flow is what FPL actually enforces — a purchase has to be funded, holding a
+        player costs nothing however much he has appreciated — and it needs no Free Hit
+        exception: FH gameweeks force every transfer variable to zero, so the balance just
+        carries across untouched.
+        """
+        logger.debug("Adding budget (cash flow) constraints")
+
+        players = self.players['element'].tolist()
+        gameweeks = list(range(1, self.T + 1))
+        buy_price = dict(zip(self.players['element'], self.players['value']))
+        sell_price = self.sale_prices()
+        opening = self.opening_bank()
+
+        for t in gameweeks:
+            spent = pulp.lpSum(
+                [float(buy_price[p]) * self.variables['s'][(p, t)] for p in players]
+            )
+            raised = pulp.lpSum(
+                [float(sell_price[p]) * self.variables['r'][(p, t)] for p in players]
+            )
+            previous = opening if t == 1 else self.variables['bank'][t - 1]
+            self.prob += (
+                self.variables['bank'][t] == previous + raised - spent,
+                f"Bank_Balance_{t}",
+            )
+
+        logger.debug(
+            "Budget constraints added (opening bank %.1fM, %d discounted players)",
+            opening / 10, len(self.selling_discounts),
+        )
 
     def add_lineup_constraints(self) -> None:
         """Add lineup selection constraints.
@@ -886,6 +1052,7 @@ class FPLSolver:
         self.add_squad_flow_constraints()
         self.add_transfer_banking_constraints()
         self.add_squad_composition_constraints()
+        self.add_budget_constraints()
         self.add_lineup_constraints()
         self.add_chip_constraints()
         self.add_advanced_constraints()
@@ -959,7 +1126,7 @@ class FPLSolver:
 
         Returns:
             Dictionary with objective_value, start_gw, squads, lineups, captains,
-            transfers, chips (including 'triple_captain' when applicable).
+            transfers, bank, chips (including 'triple_captain' when applicable).
         """
         if self.prob.status != pulp.LpStatusOptimal:
             raise ValueError("Model must be solved optimally before extracting solution")
@@ -973,6 +1140,7 @@ class FPLSolver:
             'lineups': {},
             'captains': {},
             'transfers': {},
+            'bank': {},
             'chips': {},
         }
 
@@ -1042,6 +1210,14 @@ class FPLSolver:
                 'available_transfers': free_transfers_available,
                 'wildcard_active': wildcard_active,
             }
+
+        # Cash left after that gameweek's moves, in units. Read straight off the model so
+        # the number reported can never disagree with the constraint that produced it.
+        # Rounded to the nearest tenth: prices are whole tenths, so anything else is
+        # floating-point noise from the LP relaxation.
+        for t in gameweeks:
+            value = self.variables['bank'][t].varValue
+            solution['bank'][t] = round(float(value)) if value is not None else None
 
         for t in gameweeks:
             chips_used = []
