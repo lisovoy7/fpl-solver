@@ -620,6 +620,11 @@ def main() -> None:
         "mip_gap": solver_params.get("mip_gap"),
         "bank": initial_bank,
         "selling_discounts": selling_discounts,
+        # How the solver tells a real blank gameweek from a player it simply has no
+        # forecast for. Built after fixture_overrides are applied so a moved fixture
+        # counts where it actually lands. Mirrors api_server.py — keep both in step.
+        "player_clubs": api.player_club_map(bootstrap),
+        "club_gameweeks": api.club_gameweek_map(fixtures),
     }
 
     workers = args.workers if args.workers is not None else default_worker_count()

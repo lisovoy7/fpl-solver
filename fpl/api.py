@@ -334,6 +334,45 @@ def fetch_gameweek_data_from_supabase(
         return None
 
 
+def player_club_map(bootstrap_data: Dict) -> Dict[int, int]:
+    """{player_id: club_id} for every player in the game, from the bootstrap.
+
+    Deliberately built from the bootstrap rather than from the predictions: the whole
+    point is to cover the players predictions DON'T, i.e. anyone yet to play 60 minutes
+    this season.
+    """
+    return {
+        int(e["id"]): int(e["team"])
+        for e in bootstrap_data.get("elements", [])
+        if e.get("team") is not None
+    }
+
+
+def club_gameweek_map(fixtures: pd.DataFrame) -> Dict[int, set]:
+    """{club_id: set of gameweeks that club has a fixture in}.
+
+    This is what makes a blank gameweek detectable on its own terms, instead of being
+    inferred from a player having no points forecast — see FPLSolver._add_bgw_constraints.
+    Fixtures with no gameweek assigned yet (postponements awaiting a new date) are
+    skipped: an unscheduled fixture is not a fixture the solver can plan a lineup for.
+    """
+    clubs: Dict[int, set] = {}
+    if fixtures is None or len(fixtures) == 0:
+        return clubs
+
+    gw_col = "event" if "event" in fixtures.columns else "GW"
+    for _, row in fixtures.iterrows():
+        gw = row.get(gw_col)
+        if gw is None or pd.isna(gw):
+            continue
+        for side in ("team_h", "team_a"):
+            club = row.get(side)
+            if club is None or pd.isna(club):
+                continue
+            clubs.setdefault(int(club), set()).add(int(gw))
+    return clubs
+
+
 def fetch_current_fixtures(bootstrap_data: Optional[Dict] = None) -> pd.DataFrame:
     """
     Fetch fixtures from the FPL API.

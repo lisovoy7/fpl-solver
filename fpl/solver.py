@@ -61,6 +61,8 @@ class FPLSolver:
         force_wildcard_gw: Optional[int] = None,
         bank: Optional[float] = None,
         selling_discounts: Optional[Dict[int, int]] = None,
+        player_clubs: Optional[Dict[int, int]] = None,
+        club_gameweeks: Optional[Dict[int, set]] = None,
     ):
         """
         Initialize the FPL solver.
@@ -84,6 +86,10 @@ class FPLSolver:
             selling_discounts: {player_id: units} the manager loses by selling a player
                 they already own, i.e. market price minus FPL selling price. Only players
                 in the initial squad can have one; everyone else sells for what they cost.
+            player_clubs: {player_id: club_id} for every player in the game.
+            club_gameweeks: {club_id: set of gameweeks that club has a fixture in}.
+                Together these two are how a blank gameweek is detected — see
+                _add_bgw_constraints. Omit both and it falls back to the old test.
         """
         self.T = planning_horizon
         self.budget = budget
@@ -100,6 +106,9 @@ class FPLSolver:
         self.force_wildcard_gw = force_wildcard_gw
         self.bank = bank
         self.selling_discounts = selling_discounts or {}
+        self.player_clubs = player_clubs or {}
+        self.club_gameweeks = club_gameweeks
+        self._club_cache = None
 
         self.players = None
         self.predictions = None
@@ -837,6 +846,20 @@ class FPLSolver:
                     if (player_id, internal_gw) not in self.variables['y']:
                         logger.warning("Player %d not in optimization model - cannot force lineup for GW %d", player_id, gw)
                         continue
+                    # A club with no fixture that week can't field anyone, so pinning a
+                    # start here would contradict the blank-gameweek rule and make the
+                    # whole scenario infeasible. Skip it loudly instead: one impossible
+                    # instruction should cost the caller that instruction, not the plan.
+                    # Callers that can report back should refuse before it gets this far.
+                    if self.club_gameweeks is not None:
+                        club = self._club_of(player_id)
+                        if club is not None and gw not in self.club_gameweeks.get(club, set()):
+                            logger.warning(
+                                "Player %d (%s) forced to start in GW %d but his club has no "
+                                "fixture then - ignoring that gameweek",
+                                player_id, player_name, gw,
+                            )
+                            continue
                     self.prob += (
                         self.variables['y'][(player_id, internal_gw)] == 1,
                         f"Forced_Lineup_{player_id}_GW{gw}",
@@ -885,8 +908,41 @@ class FPLSolver:
                     player_id, player_name, out_of_range_count,
                 )
 
+    def _club_of(self, player_id: int):
+        """The club a player belongs to, or None if we genuinely don't know.
+
+        Prefers the caller-supplied map (built from the FPL bootstrap, so it covers
+        every player in the game) and falls back to the team column on the player
+        frame, which is only populated for players who appear in the predictions.
+
+        Built once and cached: the blank-gameweek rule asks this for every player in
+        every gameweek, and scanning the frame each time would be thousands of lookups.
+        """
+        if self._club_cache is None:
+            cache = {}
+            if self.players is not None and 'team' in self.players.columns:
+                for element, club in zip(self.players['element'], self.players['team']):
+                    if club is not None and not pd.isna(club):
+                        cache[int(element)] = int(club)
+            # The bootstrap map wins — it is complete, where the frame's column is only
+            # filled in for players who made it into the predictions.
+            for element, club in self.player_clubs.items():
+                cache[int(element)] = int(club)
+            self._club_cache = cache
+        return self._club_cache.get(player_id)
+
     def _add_bgw_constraints(self) -> None:
-        """Prevent starting/captaining players with no fixture (BGW).
+        """Prevent starting/captaining players whose club has no fixture (BGW).
+
+        The test is the CLUB's fixture list, not whether this particular player has a
+        points forecast. Those are different questions and conflating them was a real
+        bug: forecasts are only built for players with a 60+ minute appearance this
+        season, so two gameweeks in, roughly two thirds of the game has none. Every one
+        of those players was being read as "his club isn't playing" and banned from every
+        lineup — which quietly benched squad members who were perfectly fit, and turned
+        any `forced_lineup` naming one of them into a flat contradiction ("must start" and
+        "cannot start") that failed the entire solve. A player we can't forecast is worth
+        0 points, which the objective already handles; he is not unavailable.
 
         Free Hit GWs are skipped because lineup selection is handled by the
         FH sub-problem; the main solver's y/c variables are unconstrained
@@ -905,8 +961,15 @@ class FPLSolver:
             if 1 <= gw - self.start_gw + 1 <= self.T
         }
 
+        if self.club_gameweeks is None:
+            logger.warning(
+                "No club fixture map supplied - falling back to forecast presence for BGW "
+                "detection, which mis-reads an unforecast player as having no fixture"
+            )
+
         bgw_combinations = []
         bgw_by_gw = {}
+        unknown_clubs = set()
 
         for t in gameweeks:
             if t in fh_internal_gws:
@@ -914,9 +977,28 @@ class FPLSolver:
             actual_gw = self.start_gw + t - 1
             bgw_by_gw[actual_gw] = []
             for p in players:
-                if (p, actual_gw) not in self.expected_points:
-                    bgw_combinations.append((p, t, actual_gw))
-                    bgw_by_gw[actual_gw].append(p)
+                if (p, actual_gw) in self.expected_points:
+                    continue
+                if self.club_gameweeks is not None:
+                    club = self._club_of(p)
+                    if club is None:
+                        # No club, so no way to tell a blank from a missing forecast.
+                        # He is worth 0 either way, so leave him startable rather than
+                        # risk banning a player the caller may have forced in.
+                        unknown_clubs.add(p)
+                        continue
+                    if actual_gw in self.club_gameweeks.get(club, set()):
+                        # His club plays. He simply has no forecast — 0 points, but
+                        # available.
+                        continue
+                bgw_combinations.append((p, t, actual_gw))
+                bgw_by_gw[actual_gw].append(p)
+
+        if unknown_clubs:
+            logger.warning(
+                "No club known for %d players - left startable: %s",
+                len(unknown_clubs), sorted(unknown_clubs)[:20],
+            )
 
         if not bgw_combinations:
             logger.debug("No Blank Game Weeks detected")

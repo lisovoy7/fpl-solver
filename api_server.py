@@ -811,6 +811,11 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "mip_gap": None,
         "bank": bank,
         "selling_discounts": selling_discounts,
+        # How the solver tells a real blank gameweek from a player it simply has no
+        # forecast for. Without these it falls back to "no forecast means no fixture",
+        # which two gameweeks into a season is wrong for most of the game.
+        "player_clubs": api.player_club_map(bootstrap),
+        "club_gameweeks": api.club_gameweek_map(fixtures),
     }
 
     # Announced before the first solve returns, not after: everything above this point
