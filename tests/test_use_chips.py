@@ -21,8 +21,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import api_server as A  # noqa: E402
 
 
+def _halves(first: int = 0, second: int = 0) -> dict:
+    """A detect_chips_used-shaped dict for the wildcard alone."""
+    return {"wildcards_used_first_half": first, "wildcards_used_second_half": second}
+
+
+def _wildcard(use_chips: bool, override, detected: dict) -> tuple:
+    """Resolve wildcard halves the way _optimize_inner does."""
+    return A._wildcard_halves(
+        use_chips, A._chip_halves_from(detected, "wildcards_used", override)
+    )
+
+
 def test_no_chips_spends_both_wildcards():
-    assert A._wildcard_state(use_chips=False, override=None, detected=0) == 2
+    assert _wildcard(False, None, _halves()) == (1, 1)
 
 
 def test_no_chips_beats_an_explicit_wildcard_count():
@@ -31,17 +43,18 @@ def test_no_chips_beats_an_explicit_wildcard_count():
     Honouring the narrower one would mean quietly planning with a chip the caller
     ruled out — the worse of the two ways to resolve the contradiction.
     """
-    assert A._wildcard_state(use_chips=False, override=0, detected=0) == 2
+    assert _wildcard(False, 0, _halves()) == (1, 1)
 
 
 def test_an_explicit_count_is_used_when_chips_are_on():
-    assert A._wildcard_state(use_chips=True, override=1, detected=0) == 1
+    assert _wildcard(True, 1, _halves()) == (1, 0)
     # 0 is a real value, not a missing one: it must not fall through to detection.
-    assert A._wildcard_state(use_chips=True, override=0, detected=2) == 0
+    assert _wildcard(True, 0, _halves()) == (0, 0)
 
 
 def test_detection_fills_in_when_no_count_is_sent():
-    assert A._wildcard_state(use_chips=True, override=None, detected=1) == 1
+    assert _wildcard(True, None, _halves(first=1)) == (1, 0)
+    assert _wildcard(True, None, _halves(second=1)) == (0, 1)
 
 
 def test_both_halves_spent_pins_every_wildcard_variable_to_zero():

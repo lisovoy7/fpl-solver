@@ -22,7 +22,7 @@ derived and what they do and don't account for.
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -148,24 +148,105 @@ def synthesize_gw_data(bootstrap: dict, as_of_gw: int = 1) -> pd.DataFrame:
     the proxy model already assumes every player features. Callers should pair
     this with min_hist_pct=0.0 — see run.py.
     """
-    position_by_type = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-
-    rows = []
-    for e in bootstrap.get("elements", []):
-        position = position_by_type.get(e.get("element_type"))
-        if position is None:
-            continue
-        rows.append({
-            "element": e["id"],
-            "name": f"{e.get('first_name', '')} {e.get('second_name', '')}".strip(),
-            "position": position,
-            "team": e.get("team"),
-            "value": e.get("now_cost"),
-            "GW": as_of_gw,
-            "round": as_of_gw,
-            "minutes": 90,
-        })
+    rows = [
+        row for row in (
+            _bootstrap_gw_row(e, as_of_gw, minutes=90)
+            for e in bootstrap.get("elements", [])
+        )
+        if row is not None
+    ]
 
     df = pd.DataFrame(rows)
     logger.info("Synthesized gw_data for %d players from bootstrap (no real history yet)", len(df))
     return df
+
+
+POSITION_BY_ELEMENT_TYPE = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+
+def _bootstrap_gw_row(element: dict, as_of_gw: int, minutes: int) -> Optional[dict]:
+    """One gw_data-shaped row for a bootstrap element, or None if it has no position."""
+    position = POSITION_BY_ELEMENT_TYPE.get(element.get("element_type"))
+    if position is None:
+        return None
+    return {
+        "element": element["id"],
+        "name": f"{element.get('first_name', '')} {element.get('second_name', '')}".strip(),
+        "position": position,
+        "team": element.get("team"),
+        "value": element.get("now_cost"),
+        "GW": as_of_gw,
+        "round": as_of_gw,
+        "minutes": minutes,
+    }
+
+
+def ensure_players_present(
+    gw_data: pd.DataFrame,
+    required_ids: Iterable[int],
+    bootstrap: dict,
+    as_of_gw: int = 1,
+) -> Tuple[pd.DataFrame, List[int]]:
+    """
+    Guarantee gw_data holds at least one row for every id in `required_ids`.
+
+    The current squad has to be in the solver's player pool, or the model is not
+    merely suboptimal — it is INFEASIBLE. load_player_data() builds the pool from
+    gw_data; Squad_Size pins ownership at exactly 15 in every gameweek; and the
+    transfer-count constraints force transfers-in to equal transfers-out. So 14
+    owned players can never become 15: every scenario returns INFEASIBLE and the
+    whole run dies with "No feasible solution found", which tells the user nothing
+    about what happened or which player caused it.
+
+    A squad member with no history is an ordinary thing, not a corrupt state: a
+    mid-season signing bought the day FPL registers him has no per-fixture rows
+    until his club next plays, and any sync gap does the same for anyone.
+    create_watchlist() already resurrects must-include players missing from
+    PREDICTIONS, but it reads their price out of gw_data — so it cannot help
+    someone missing from gw_data too, and silently skips them while logging that it
+    added them.
+
+    Call this AFTER generate_predictions(), never before: these rows carry no real
+    appearance and would otherwise be folded into the per-player averages that
+    predictions are built from.
+
+    `minutes=0` marks them as what they are, so nothing mistakes one for an
+    appearance. The player is added to be ownable and sellable, not to be
+    recommended — he arrives with no predicted points and the solver is free to
+    transfer him out.
+
+    Returns:
+        (gw_data, still_missing) — still_missing lists ids bootstrap does not know
+        either, which cannot be synthesized and will still break the solve.
+    """
+    required = list(dict.fromkeys(required_ids))
+    if not required:
+        return gw_data, []
+
+    present = set(gw_data["element"].tolist()) if len(gw_data) else set()
+    missing = [pid for pid in required if pid not in present]
+    if not missing:
+        return gw_data, []
+
+    by_id = {int(e["id"]): e for e in bootstrap.get("elements", []) if "id" in e}
+    rows = []
+    still_missing = []
+    for pid in missing:
+        element = by_id.get(int(pid))
+        row = _bootstrap_gw_row(element, as_of_gw, minutes=0) if element else None
+        if row is None:
+            still_missing.append(pid)
+        else:
+            rows.append(row)
+
+    if rows:
+        gw_data = pd.concat([gw_data, pd.DataFrame(rows)], ignore_index=True)
+        logger.warning(
+            "Synthesized gw_data rows for %d squad player(s) with no history: %s. "
+            "They are ownable with no predicted points; without this the solve is infeasible.",
+            len(rows), [r["element"] for r in rows],
+        )
+    if still_missing:
+        logger.error("bootstrap has no entry for squad player(s) %s", still_missing)
+
+    return gw_data, still_missing

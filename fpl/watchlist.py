@@ -121,10 +121,22 @@ def create_watchlist(
         missing_rows["recent_hist_games"] = 0
         missing_rows = missing_rows.rename(columns={"value": "cost"})
         must_include_df = pd.concat([must_include_df, missing_rows], ignore_index=True)
+        # Report what was actually added, not what was asked for. A player absent from
+        # gw_data as well has no row to resurrect and is skipped here — this used to
+        # claim it had added him, which is a hard thing to debug when the solve then
+        # fails somewhere else entirely.
+        added_ids = sorted(missing_rows["element"].tolist())
         logger.info(
             "Added %d must-include players missing from predictions: %s",
-            len(missing_ids), sorted(missing_ids),
+            len(added_ids), added_ids,
         )
+        skipped_ids = sorted(missing_ids - set(added_ids))
+        if skipped_ids:
+            logger.warning(
+                "Could not add must-include players %s — no gw_data row either, so they "
+                "are not in the solver's pool at all",
+                skipped_ids,
+            )
 
     # 7. Filter remaining by recent_hist_games >= min_hist_games
     filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
