@@ -201,9 +201,61 @@ def _player_name(players: pd.DataFrame, pid: int) -> str:
     return row["name"].iloc[0] if len(row) else str(pid)
 
 
-def _wildcard_state(use_chips: bool, override: Optional[int], detected: int) -> int:
+def _non_free_hit_squad_gw(last_gw: int, free_hit_gws: List[int], first_gw: int = 1) -> int:
     """
-    How many wildcards to treat as already spent, 0-2.
+    The gameweek whose picks are the squad the manager actually owns.
+
+    A Free Hit squad exists for exactly one gameweek and then reverts, so picks on a
+    Free Hit GW are a one-week loan, not a squad. Step back one gameweek when that is
+    what `last_gw` landed on — but never past `first_gw`, the manager's earliest
+    gameweek, where there are no picks to read at all. In that corner the Free Hit
+    squad is the only thing on record and is returned as-is.
+    """
+    if last_gw in free_hit_gws and last_gw - 1 >= first_gw:
+        return last_gw - 1
+    return last_gw
+
+
+def _chip_halves_from(
+    detected_chips: Dict[str, Any], key: str, total_override: Optional[int]
+) -> Tuple[int, int]:
+    """
+    One chip's spent halves as (first_half, second_half), each 0 or 1.
+
+    Two sources, unioned, because neither alone is trustworthy in both directions:
+
+    - Detection knows WHICH half a use belongs to (the history payload carries the
+      gameweek — see api.detect_chips_used), and is authoritative about the past.
+    - An override is only a total, so it cannot say which half it means. A caller in
+      the second half encodes "still available" as 1, not 0, since an unplayed
+      first-half chip expires rather than carrying over. Splitting that total as
+      min/max is therefore right for the caller's intent and blind to a chip actually
+      played after GW20.
+
+    Unioning them means a half detection has *proved* spent can never be talked back
+    into being available, while a caller can still say a chip is gone that FPL has not
+    recorded yet — the "plan as if my Free Hit were already gone" case. The reverse,
+    asking to plan with a chip the record shows was played, is not a use case: it can
+    only produce a plan that cannot be executed.
+
+    Worked example, the bug this fixes. Manager let the first-half Bench Boost expire
+    and played it in GW22; a solve at GW25 sees a detected total of 1. The old split
+    read that as "first half gone, second half free" and the winning plan scheduled a
+    second Bench Boost. Now detection reports second_half=1 and no override undoes it.
+    """
+    detected_first = min(1, detected_chips.get(f"{key}_first_half", 0))
+    detected_second = min(1, detected_chips.get(f"{key}_second_half", 0))
+    if total_override is None:
+        return detected_first, detected_second
+
+    override_first = min(total_override, 1)
+    override_second = max(0, total_override - 1)
+    return max(override_first, detected_first), max(override_second, detected_second)
+
+
+def _wildcard_halves(use_chips: bool, halves: Tuple[int, int]) -> Tuple[int, int]:
+    """
+    Which wildcard halves to treat as already spent, as (first_half, second_half).
 
     `use_chips: false` means "no chips", and that has to include the wildcard. The other
     three are enumerated into scenarios, so collapsing to the single "No chips" scenario
@@ -220,8 +272,8 @@ def _wildcard_state(use_chips: bool, override: Optional[int], detected: int) -> 
     a chip the caller ruled out.
     """
     if not use_chips:
-        return 2
-    return override if override is not None else detected
+        return 1, 1
+    return halves
 
 
 def _resolve_money(
@@ -520,9 +572,32 @@ async def get_squad(team_id: int):
                 "reason": "picks_not_public_yet",
             }
 
-        team_data = api.fetch_team_data(team_id, last_gw)
-        selling_info, selling_summary = api.get_squad_selling_prices(team_id, last_gw)
         chips_used = api.detect_chips_used(team_id)
+
+        # A Free Hit squad exists for exactly one gameweek and then reverts, so the
+        # picks on a Free Hit GW are not the squad this manager owns — mirroring the
+        # same step-back in _optimize_inner and run.py.
+        #
+        # Without this, for the whole week between a Free Hit deadline and the next
+        # one, /api/squad hands back 15 players the manager will not have. The
+        # frontend then asks them to confirm that squad on the verification card, and
+        # a confirmed card is sent to the optimizer as the authoritative `squad`
+        # override — so the entire plan gets built on the wrong team. Selling prices
+        # are wrong too: _build_purchase_prices skips Free Hit week transfers, so
+        # those players fall back to season-start prices.
+        first_gw = max(1, int(entry.get("started_event") or 1))
+        squad_gw = _non_free_hit_squad_gw(
+            last_gw, chips_used.get("free_hit_gws", []), first_gw
+        )
+        if squad_gw == last_gw and last_gw in chips_used.get("free_hit_gws", []):
+            logger.warning(
+                "Team %d played a Free Hit in GW%d, its earliest gameweek — returning "
+                "the Free Hit squad, which will revert",
+                team_id, last_gw,
+            )
+
+        team_data = api.fetch_team_data(team_id, squad_gw)
+        selling_info, selling_summary = api.get_squad_selling_prices(team_id, squad_gw)
 
         squad_details = []
         for pid in team_data["squad"]:
@@ -534,6 +609,9 @@ async def get_squad(team_id: int):
         return {
             "team_id": team_id,
             "current_gw": current_gw,
+            # Which gameweek's picks this squad actually came from. Normally the last
+            # gameweek with public picks; one earlier when that was a Free Hit.
+            "squad_gw": squad_gw,
             "squad": squad_details,
             "bank": selling_summary["bank"] / 10,
             "total_budget": selling_summary["correct_budget"] / 10,
@@ -542,6 +620,25 @@ async def get_squad(team_id: int):
                 "free_hits_used": chips_used.get("free_hits_used", 0),
                 "bench_boost_used": chips_used.get("bench_boost_used", 0),
                 "triple_captain_used": chips_used.get("triple_captain_used", 0),
+            },
+            # The same four chips, split by the half each use was actually played in.
+            # A total cannot answer "has this manager spent the chip for the half being
+            # planned?": one use in GW22 is a second-half use, and a consumer deriving
+            # the half from the count alone has to assume the first use was GW1-19, so
+            # it reads that manager as still holding a Bench Boost. Additive to the
+            # totals above rather than replacing them, so existing callers are
+            # unaffected.
+            "chips_used_by_half": {
+                key: {
+                    "first_half": min(1, chips_used.get(f"{key}_first_half", 0)),
+                    "second_half": min(1, chips_used.get(f"{key}_second_half", 0)),
+                }
+                for key in (
+                    "wildcards_used",
+                    "free_hits_used",
+                    "bench_boost_used",
+                    "triple_captain_used",
+                )
             },
         }
     except HTTPException:
@@ -660,10 +757,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     current_gw = detected_gw
     horizon = min(req.planning_horizon, 38 - current_gw + 1)
 
-    free_hit_gws = detected_chips.get("free_hit_gws", [])
-    squad_gw = current_gw - 1
-    if squad_gw in free_hit_gws and squad_gw > 1:
-        squad_gw -= 1
+    squad_gw = _non_free_hit_squad_gw(current_gw - 1, detected_chips.get("free_hit_gws", []))
 
     # A caller-supplied squad is one the user has confirmed, so it outranks whatever the
     # FPL API reports — which is only ever as of the last deadline, and is empty
@@ -700,6 +794,18 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         gw_data = _get_gw_data(bootstrap)
         predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
 
+    # Every owned player must exist in the pool or the model is infeasible rather
+    # than merely suboptimal — see ensure_players_present. Applied after
+    # generate_predictions so the synthesized rows never reach the averages.
+    gw_data, unknown_squad_players = proxy_predict.ensure_players_present(
+        gw_data, current_squad, bootstrap
+    )
+    if unknown_squad_players:
+        raise ValueError(
+            "FPL has no player data for squad member(s) "
+            f"{unknown_squad_players} — cannot build a plan around them"
+        )
+
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
     # forced_lineup players are promoted too, mirroring run.py: a forced start is only
@@ -723,20 +829,21 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     non_playing_tuples = [(e.player, list(e.gameweeks)) for e in req.non_playing if e.gameweeks] or None
 
     # Explicit request values win over API detection; None means "use what we detected".
-    def _chip_state(override: Optional[int], key: str) -> int:
-        return override if override is not None else detected_chips.get(key, 0)
+    def _chip_halves(total_override: Optional[int], key: str) -> Tuple[int, int]:
+        return _chip_halves_from(detected_chips, key, total_override)
 
-    wildcards_used = _wildcard_state(
-        req.use_chips, req.wildcards_used, detected_chips.get("wildcards_used", 0)
+    wildcard_first_half, wildcard_second_half = _wildcard_halves(
+        req.use_chips, _chip_halves(req.wildcards_used, "wildcards_used")
     )
-    free_hits_used = _chip_state(req.free_hits_used, "free_hits_used")
-    bench_boost_used = _chip_state(req.bench_boost_used, "bench_boost_used")
-    triple_captain_used = _chip_state(req.triple_captain_used, "triple_captain_used")
-
-    bench_boost_used_first_half = min(bench_boost_used, 1)
-    bench_boost_used_second_half = max(0, bench_boost_used - 1)
-    triple_captain_used_first_half = min(triple_captain_used, 1)
-    triple_captain_used_second_half = max(0, triple_captain_used - 1)
+    free_hits_used_first_half, free_hits_used_second_half = _chip_halves(
+        req.free_hits_used, "free_hits_used"
+    )
+    bench_boost_used_first_half, bench_boost_used_second_half = _chip_halves(
+        req.bench_boost_used, "bench_boost_used"
+    )
+    triple_captain_used_first_half, triple_captain_used_second_half = _chip_halves(
+        req.triple_captain_used, "triple_captain_used"
+    )
 
     # Neither chip changes anything about the plan except which GW it lands
     # on relative to its own already-solved lineup (Triple Captain exactly;
@@ -760,8 +867,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     else:
         chip_scenarios = generate_chip_scenarios(
             start_gw=current_gw, planning_horizon=horizon,
-            free_hits_used_first_half=min(free_hits_used, 1),
-            free_hits_used_second_half=max(0, free_hits_used - 1),
+            free_hits_used_first_half=free_hits_used_first_half,
+            free_hits_used_second_half=free_hits_used_second_half,
             bench_boost_used_first_half=1 if defer_bench_boost else bench_boost_used_first_half,
             bench_boost_used_second_half=1 if defer_bench_boost else bench_boost_used_second_half,
             triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
@@ -805,8 +912,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "watchlist": watchlist,
         "current_squad": current_squad,
         "free_transfers": req.free_transfers,
-        "wildcard_first_half": min(wildcards_used, 1),
-        "wildcard_second_half": max(0, wildcards_used - 1),
+        "wildcard_first_half": wildcard_first_half,
+        "wildcard_second_half": wildcard_second_half,
         "time_limit": req.time_limit_per_scenario,
         "mip_gap": None,
         "bank": bank,

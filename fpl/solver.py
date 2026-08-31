@@ -250,6 +250,17 @@ class FPLSolver:
         if name_col != 'name':
             player_data = player_data.rename(columns={name_col: 'name'})
 
+        # A player can be in gw_data and absent from predictions — a squad member with
+        # no history, synthesized by proxy_predict.ensure_players_present. The left
+        # merge above leaves his club NaN, and self.players['team'] IS the club map
+        # behind the max-3-per-club constraint, so he would quietly escape it. gw_data
+        # carries the club for exactly these rows; prefer it over nothing.
+        if 'team' in latest_values.columns:
+            fallback_clubs = dict(zip(latest_values['element'], latest_values['team']))
+            player_data['player_team_id'] = player_data['player_team_id'].fillna(
+                player_data['element'].map(fallback_clubs)
+            )
+
         self.players = player_data.rename(columns={'player_team_id': 'team'})
 
         if player_subset is not None:
