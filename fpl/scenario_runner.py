@@ -89,6 +89,8 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         force_wildcard_gw=scenario.get("force_wildcard_gw"),
         bank=ctx.get("bank"),
         selling_discounts=ctx.get("selling_discounts"),
+        player_clubs=ctx.get("player_clubs"),
+        club_gameweeks=ctx.get("club_gameweeks"),
     )
     solver.load_predictions(ctx["predictions"])
     if len(solver.predictions) == 0:

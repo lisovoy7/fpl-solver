@@ -334,6 +334,45 @@ def fetch_gameweek_data_from_supabase(
         return None
 
 
+def player_club_map(bootstrap_data: Dict) -> Dict[int, int]:
+    """{player_id: club_id} for every player in the game, from the bootstrap.
+
+    Deliberately built from the bootstrap rather than from the predictions: the whole
+    point is to cover the players predictions DON'T, i.e. anyone yet to play 60 minutes
+    this season.
+    """
+    return {
+        int(e["id"]): int(e["team"])
+        for e in bootstrap_data.get("elements", [])
+        if e.get("team") is not None
+    }
+
+
+def club_gameweek_map(fixtures: pd.DataFrame) -> Dict[int, set]:
+    """{club_id: set of gameweeks that club has a fixture in}.
+
+    This is what makes a blank gameweek detectable on its own terms, instead of being
+    inferred from a player having no points forecast — see FPLSolver._add_bgw_constraints.
+    Fixtures with no gameweek assigned yet (postponements awaiting a new date) are
+    skipped: an unscheduled fixture is not a fixture the solver can plan a lineup for.
+    """
+    clubs: Dict[int, set] = {}
+    if fixtures is None or len(fixtures) == 0:
+        return clubs
+
+    gw_col = "event" if "event" in fixtures.columns else "GW"
+    for _, row in fixtures.iterrows():
+        gw = row.get(gw_col)
+        if gw is None or pd.isna(gw):
+            continue
+        for side in ("team_h", "team_a"):
+            club = row.get(side)
+            if club is None or pd.isna(club):
+                continue
+            clubs.setdefault(int(club), set()).add(int(gw))
+    return clubs
+
+
 def fetch_current_fixtures(bootstrap_data: Optional[Dict] = None) -> pd.DataFrame:
     """
     Fetch fixtures from the FPL API.
@@ -542,6 +581,18 @@ def get_squad_selling_prices(
     return result_list, summary
 
 
+# First GW of the second chip half-season. Mirrors CHIP_WINDOWS in fpl/free_hit.py.
+CHIP_SECOND_HALF_START = 20
+
+# FPL's chip names, mapped to the count keys the solver and the HTTP API use.
+_CHIP_COUNT_KEYS = {
+    "wildcard": "wildcards_used",
+    "freehit": "free_hits_used",
+    "bboost": "bench_boost_used",
+    "3xc": "triple_captain_used",
+}
+
+
 def detect_chips_used(team_id: int) -> Dict:
     """
     Fetch history data and parse chips array.
@@ -549,8 +600,19 @@ def detect_chips_used(team_id: int) -> Dict:
     All four chip types follow the same rule: one allowed per half-season
     (GW 1-19 and GW 20-38), so each can be used 0, 1, or 2 times total.
 
+    A total count alone cannot answer "does this manager still have a wildcard?",
+    which is the only question the solver actually asks. One use means one half is
+    gone, and WHICH half is decided by the gameweek it was played in — so a single
+    Bench Boost played in GW22 is a second-half use, and reading it as the first
+    half hands back a chip that has already been spent. Callers used to derive the
+    split as `min(used, 1) / max(0, used - 1)`, i.e. "the first use always happened
+    in GW1-19", which is wrong for every manager who skipped a first-half chip.
+
+    The gameweek is right there in the history payload, so it is kept.
+
     Returns:
-        Dict with total counts for each chip type (int, 0-2) plus
+        Dict with total counts for each chip type (int, 0-2), the same counts split
+        per half as `<chip>_used_first_half` / `<chip>_used_second_half`, and
         `free_hit_gws` (list of GWs where Free Hit was used).
     """
     history = _fetch_history_data(team_id)
@@ -562,17 +624,30 @@ def detect_chips_used(team_id: int) -> Dict:
         "triple_captain_used": 0,
         "free_hit_gws": [],
     }
+    for count_key in _CHIP_COUNT_KEYS.values():
+        result[f"{count_key}_first_half"] = 0
+        result[f"{count_key}_second_half"] = 0
+
     for c in chips:
-        name = c.get("name", "")
+        count_key = _CHIP_COUNT_KEYS.get(c.get("name", ""))
+        if count_key is None:
+            continue
         event = c.get("event")
-        if name == "wildcard":
-            result["wildcards_used"] += 1
-        elif name == "freehit":
-            result["free_hits_used"] += 1
-            if event is not None:
-                result["free_hit_gws"].append(int(event))
-        elif name == "bboost":
-            result["bench_boost_used"] += 1
-        elif name == "3xc":
-            result["triple_captain_used"] += 1
+        result[count_key] += 1
+        if count_key == "free_hits_used" and event is not None:
+            result["free_hit_gws"].append(int(event))
+
+        # An entry with no gameweek cannot be attributed, so it falls to the first
+        # half — the assumption the old count-only split made everywhere, now the
+        # exception rather than the rule.
+        if event is not None and int(event) >= CHIP_SECOND_HALF_START:
+            result[f"{count_key}_second_half"] += 1
+        else:
+            if event is None:
+                logger.warning(
+                    "Chip %r for team %d has no gameweek; attributing it to the first half",
+                    c.get("name"), team_id,
+                )
+            result[f"{count_key}_first_half"] += 1
+
     return result

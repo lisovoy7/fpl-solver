@@ -347,6 +347,14 @@ def main() -> None:
     detected_chips = api.detect_chips_used(team_id)
     logger.info("Detected chips used: %s", detected_chips)
 
+    # Captured before the merge folds detection into config["chips"], so the half
+    # attribution below can tell a total the user actually wrote from one that came
+    # from detection — which knows the halves exactly. See _chip_halves.
+    user_chip_totals = {
+        key: config.get("chips", {}).get(key)
+        for key in ("wildcards_used", "free_hits_used", "bench_boost_used", "triple_captain_used")
+    }
+
     cfg.merge_api_values(config, current_gw=detected_gw, chips=detected_chips)
 
     current_gw = config.get("current_gw", detected_gw)
@@ -503,15 +511,45 @@ def main() -> None:
                        "(candidate pool is unfiltered; verify the squad manually)")
         min_hist_pct = 0.0
 
+    # Every owned player must exist in the pool or the model is infeasible rather
+    # than merely suboptimal — see ensure_players_present. Applied after predictions
+    # are built so the synthesized rows never reach the averages.
+    gw_data, unknown_squad_players = proxy_predict.ensure_players_present(
+        gw_data, current_squad, bootstrap
+    )
+    if unknown_squad_players:
+        raise ValueError(
+            f"FPL has no player data for squad member(s) {unknown_squad_players} "
+            "— cannot build a plan around them"
+        )
+
     watchlist = create_watchlist(predictions, gw_data, min_hist_pct=min_hist_pct,
                                 max_hist_window=max_hist_window,
                                 must_include=must_include, must_exclude=must_exclude)
 
     # 6. Chip scenarios
-    wildcards_used = chips_cfg.get("wildcards_used", 0)
-    free_hits_used = chips_cfg.get("free_hits_used", 0)
-    bench_boost_used = chips_cfg.get("bench_boost_used", 0)
-    triple_captain_used = chips_cfg.get("triple_captain_used", 0)
+    def _chip_halves(key: str) -> Tuple[int, int]:
+        """
+        One chip's spent halves as (first_half, second_half), each 0 or 1.
+
+        Mirrors _chip_halves in api_server.py — keep both in step. Detection knows
+        which half each use belongs to (the gameweek is in the history payload); a
+        config total does not, and is unioned in so it can only ever add a spent
+        half. Splitting a total alone as min/max assumes the first use happened in
+        GW1-19, which reads a Bench Boost played in GW22 as "first half gone, second
+        half free" and plans a second one the manager does not have.
+        """
+        detected_first = min(1, chips_cfg.get(f"{key}_first_half", 0))
+        detected_second = min(1, chips_cfg.get(f"{key}_second_half", 0))
+        total = user_chip_totals.get(key)
+        if total is None:
+            return detected_first, detected_second
+        return max(min(total, 1), detected_first), max(max(0, total - 1), detected_second)
+
+    wildcard_first_half, wildcard_second_half = _chip_halves("wildcards_used")
+    free_hits_used_first_half, free_hits_used_second_half = _chip_halves("free_hits_used")
+    bench_boost_used_first_half, bench_boost_used_second_half = _chip_halves("bench_boost_used")
+    triple_captain_used_first_half, triple_captain_used_second_half = _chip_halves("triple_captain_used")
 
     force_free_hit_gw = chips_cfg.get("force_free_hit_gw")
     force_bench_boost_gw = chips_cfg.get("force_bench_boost_gw")
@@ -525,11 +563,6 @@ def main() -> None:
         force_free_hit_gw = args.force_free_hit_gw
     if args.force_bench_boost_gw is not None:
         force_bench_boost_gw = args.force_bench_boost_gw
-
-    bench_boost_used_first_half = min(bench_boost_used, 1)
-    bench_boost_used_second_half = max(0, bench_boost_used - 1)
-    triple_captain_used_first_half = min(triple_captain_used, 1)
-    triple_captain_used_second_half = max(0, triple_captain_used - 1)
 
     # Neither chip changes anything about the plan except which GW it lands on
     # relative to its own already-solved lineup (Triple Captain exactly — the
@@ -558,8 +591,8 @@ def main() -> None:
         chip_scenarios = generate_chip_scenarios(
             start_gw=current_gw,
             planning_horizon=horizon,
-            free_hits_used_first_half=min(free_hits_used, 1),
-            free_hits_used_second_half=max(0, free_hits_used - 1),
+            free_hits_used_first_half=free_hits_used_first_half,
+            free_hits_used_second_half=free_hits_used_second_half,
             bench_boost_used_first_half=1 if defer_bench_boost else bench_boost_used_first_half,
             bench_boost_used_second_half=1 if defer_bench_boost else bench_boost_used_second_half,
             triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
@@ -614,12 +647,17 @@ def main() -> None:
         "watchlist": watchlist,
         "current_squad": current_squad,
         "free_transfers": free_transfers,
-        "wildcard_first_half": min(wildcards_used, 1),
-        "wildcard_second_half": max(0, wildcards_used - 1),
+        "wildcard_first_half": wildcard_first_half,
+        "wildcard_second_half": wildcard_second_half,
         "time_limit": time_limit,
         "mip_gap": solver_params.get("mip_gap"),
         "bank": initial_bank,
         "selling_discounts": selling_discounts,
+        # How the solver tells a real blank gameweek from a player it simply has no
+        # forecast for. Built after fixture_overrides are applied so a moved fixture
+        # counts where it actually lands. Mirrors api_server.py — keep both in step.
+        "player_clubs": api.player_club_map(bootstrap),
+        "club_gameweeks": api.club_gameweek_map(fixtures),
     }
 
     workers = args.workers if args.workers is not None else default_worker_count()

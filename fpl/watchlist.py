@@ -41,6 +41,18 @@ def create_watchlist(
     must_include = must_include or []
     must_exclude = must_exclude or []
 
+    # Exclusion wins, everywhere and permanently. Without this it only won until step 6b:
+    # step 5 drops the excluded players out of `merged`, and step 6b then adds back every
+    # must_include player that isn't in `merged` — which step 5 has just guaranteed they
+    # aren't. Since the current squad is always in must_include, "never own this player"
+    # silently did nothing for anyone the manager already owns.
+    if must_exclude:
+        excluded = set(must_exclude)
+        dropped = [p for p in must_include if p in excluded]
+        must_include = [p for p in must_include if p not in excluded]
+        if dropped:
+            logger.info("Excluded players dropped from must_include: %s", sorted(dropped))
+
     # 1. Count recent 60+ min appearances within the last `window_size` GWs,
     #    where window_size is capped at max_hist_window but shrinks to whatever
     #    GWs actually exist early in the season.
@@ -96,7 +108,8 @@ def create_watchlist(
 
     # 6b. Add must_include players that have no predictions (e.g. bench GKs
     #     who never played 60+ min).  They need to be in the solver's player
-    #     pool so initial-squad constraints stay feasible.
+    #     pool so initial-squad constraints stay feasible. must_exclude has
+    #     already been removed from must_include above, so this cannot undo it.
     missing_ids = set(must_include) - set(merged["element"].tolist())
     if missing_ids:
         gw_col_local = "GW" if "GW" in gw_data.columns else None
@@ -108,10 +121,22 @@ def create_watchlist(
         missing_rows["recent_hist_games"] = 0
         missing_rows = missing_rows.rename(columns={"value": "cost"})
         must_include_df = pd.concat([must_include_df, missing_rows], ignore_index=True)
+        # Report what was actually added, not what was asked for. A player absent from
+        # gw_data as well has no row to resurrect and is skipped here — this used to
+        # claim it had added him, which is a hard thing to debug when the solve then
+        # fails somewhere else entirely.
+        added_ids = sorted(missing_rows["element"].tolist())
         logger.info(
             "Added %d must-include players missing from predictions: %s",
-            len(missing_ids), sorted(missing_ids),
+            len(added_ids), added_ids,
         )
+        skipped_ids = sorted(missing_ids - set(added_ids))
+        if skipped_ids:
+            logger.warning(
+                "Could not add must-include players %s — no gw_data row either, so they "
+                "are not in the solver's pool at all",
+                skipped_ids,
+            )
 
     # 7. Filter remaining by recent_hist_games >= min_hist_games
     filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
