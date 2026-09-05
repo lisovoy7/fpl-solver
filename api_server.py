@@ -970,6 +970,55 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             best_total = total_points
             best_result = result
 
+    # ── EXPERIMENTAL shadow evaluation of Free Hit pruning — logging only. ──
+    # Question under test: could the 16 "FH in GW g" scenarios be pruned to a
+    # top-K before solving, the way BB/TC placements already are? A scenario's
+    # total is base_points + fh_benefits[g] and the second term is exact and
+    # precomputed, so a cheap rank only has to predict the base term's variation.
+    # Two candidate rankings, logged against the truth the full enumeration just
+    # produced: the FH week's own precomputed points ("benefit"), and that minus
+    # what the no-chip plan scored the same week ("uplift" — the opportunity cost
+    # proxy). If the true winner consistently ranks top-3 in either, pruning to
+    # K=6 is safe; if it ever ranks below K, this idea dies here.
+    try:
+        _fh_rows = [r for r in scenario_results if len(r["free_hit_gws"]) == 1]
+        _nochip = next((r for r in scenario_results if not r["free_hit_gws"]), None)
+        if len(_fh_rows) >= 4 and _nochip is not None and fh_benefits:
+            _nochip_week_pts: Dict[int, float] = {}
+            for _t, _lineup in _nochip["solution"]["lineups"].items():
+                _gw = current_gw + _t - 1
+                _pts = sum(
+                    _nochip["squad_points"].get((_p, _gw), 0.0)
+                    for _p in _lineup.get("starters", [])
+                )
+                _cap = _nochip["solution"]["captains"].get(_t)
+                if _cap is not None:
+                    _pts += _nochip["squad_points"].get((_cap, _gw), 0.0)
+                _nochip_week_pts[_gw] = _pts
+            _shadow = []
+            for _r in _fh_rows:
+                _g = _r["free_hit_gws"][0]
+                _benefit = fh_benefits.get(_g, {}).get("total_points", 0.0)
+                _shadow.append({
+                    "gw": _g,
+                    "true": round(_r["total_points"], 1),
+                    "benefit": round(_benefit, 1),
+                    "uplift": round(_benefit - _nochip_week_pts.get(_g, 0.0), 1),
+                })
+            _winner_gw = max(_shadow, key=lambda x: x["true"])["gw"]
+            def _winner_rank(key: str) -> int:
+                _order = sorted(_shadow, key=lambda x: -x[key])
+                return next(i + 1 for i, x in enumerate(_order) if x["gw"] == _winner_gw)
+            logger.info(
+                "FH-prune shadow: true winner GW%d ranks %d/%d by benefit-only, "
+                "%d/%d by uplift. rows=%s",
+                _winner_gw, _winner_rank("benefit"), len(_shadow),
+                _winner_rank("uplift"), len(_shadow),
+                sorted(_shadow, key=lambda x: -x["true"]),
+            )
+    except Exception:
+        logger.exception("FH-prune shadow evaluation failed (harmless)")
+
     # Score every solved FH-only plan's best legal Bench Boost GW and/or Triple
     # Captain GW (whichever is deferred — see the comment above defer_bench_boost),
     # then re-solve only the top-scored (FH, BB, TC) combinations as full MILPs.
