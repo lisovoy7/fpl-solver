@@ -20,6 +20,7 @@ def create_watchlist(
     max_hist_window: int = 6,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,
+    max_gw: Optional[int] = None,
 ) -> List[int]:
     """
     Build a watchlist of player IDs for the MILP solver.
@@ -35,6 +36,21 @@ def create_watchlist(
             so a single-GW season still lets qualifying players through.
         must_include: Player IDs to always include (e.g. current squad).
         must_exclude: Player IDs to always exclude.
+        max_gw: Last gameweek the eligibility window may see. Defaults to whatever
+            gw_data holds, which is right only when `predictions` was built from that
+            same gw_data. It usually isn't: the API serves predictions from a table
+            refreshed an hour AFTER the history sync, so during that hour eligibility
+            would be judged on newer data than the points it selects on. Pass the
+            predictions' own vintage and the two halves can never disagree.
+
+            This matters because the skew is one-directional. A player becomes newly
+            eligible precisely BECAUSE he just started a match, and the prediction that
+            predates that match rests on a smaller sample — which is exactly where
+            small-sample inflation lives. Observed 2026-09-05: Yalcouyé cleared this
+            filter on GW1-3 (2 starts, threshold 2) while priced from GW1-2 at 12.19 for
+            GW4. On GW1-3 pricing he is 7.43; on GW1-2 eligibility he has 1 start against
+            a threshold of 2 and never enters the pool. Only the mismatch selects him,
+            and it put him in a Free Hit squad with the armband.
 
     Returns:
         List of player IDs.
@@ -59,16 +75,33 @@ def create_watchlist(
     #    GWs actually exist early in the season.
     gw_col = "GW" if "GW" in gw_data.columns else None
     if gw_col:
-        max_gw = int(gw_data[gw_col].max())
-        window_size = min(max_gw, max_hist_window)
-        window_start = max_gw - window_size + 1
-        recent_gw = gw_data[(gw_data[gw_col] >= window_start) & (gw_data["minutes"] >= 60)]
+        data_max_gw = int(gw_data[gw_col].max())
+        # Never look past the vintage the predictions were built from — and never past the
+        # data actually held. min() rather than trusting the caller: a table stamped with a
+        # gameweek this service hasn't synced yet must not widen the window.
+        window_end = data_max_gw if max_gw is None else min(int(max_gw), data_max_gw)
+        window_size = min(window_end, max_hist_window)
+        window_start = window_end - window_size + 1
+        # The upper bound is new alongside `max_gw`: without it a clamped window still
+        # counts appearances from gameweeks the predictions never saw, which is the exact
+        # mismatch this exists to close.
+        recent_gw = gw_data[
+            (gw_data[gw_col] >= window_start)
+            & (gw_data[gw_col] <= window_end)
+            & (gw_data["minutes"] >= 60)
+        ]
         recent_counts = recent_gw.groupby("element").size().reset_index(name="recent_hist_games")
         min_hist_games = math.ceil(window_size * min_hist_pct)
+        if max_gw is not None and window_end < data_max_gw:
+            logger.info(
+                "Eligibility clamped to GW %d (the predictions' vintage) — gw_data holds GW %d",
+                window_end, data_max_gw,
+            )
         logger.info(
             "Recent window: GW %d-%d (%d GWs), requiring >= %d appearances (%.0f%%), "
             "%d players with 60+ min appearances",
-            window_start, max_gw, window_size, min_hist_games, min_hist_pct * 100, len(recent_counts),
+            window_start, window_end, window_size, min_hist_games, min_hist_pct * 100,
+            len(recent_counts),
         )
     else:
         logger.warning("No GW column in gw_data — falling back to all-time hist_games")

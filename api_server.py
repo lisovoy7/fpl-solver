@@ -224,21 +224,30 @@ def _player_name(players: pd.DataFrame, pid: int) -> str:
 PREDICTIONS_TABLE_MAX_AGE_HOURS = 30
 
 
-def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Optional[pd.DataFrame]:
+def _predictions_from_supabase(
+    bootstrap: dict, gw_data: pd.DataFrame
+) -> tuple[Optional[pd.DataFrame], Optional[int]]:
     """
     Load the nightly cron's predictions from player_predictions instead of
     regenerating them in-process (~25s of pandas per request for numbers that
     only change once a day, and that Alfie is already reading from this table).
 
-    Returns None whenever the table can't serve the request — missing client,
-    empty table, stale rows, or any read error — and the caller falls back to
-    generate_predictions(), which is always current. The table stores summed
-    points per (player, gameweek); name/position/club come from bootstrap and
-    hist_games (60+ minute appearances, which create_watchlist aggregates) is
+    Returns (None, None) whenever the table can't serve the request — missing
+    client, empty table, stale rows, or any read error — and the caller falls
+    back to generate_predictions(), which is always current. The table stores
+    summed points per (player, gameweek); name/position/club come from bootstrap
+    and hist_games (60+ minute appearances, which create_watchlist aggregates) is
     recounted from gw_data, so consumers see the same columns either way.
+
+    The second element is the run's `through_gw` — the last gameweek of played
+    history these numbers were built from. It exists because this table lags
+    gw_data by design: the history sync runs an hour BEFORE predictions
+    regenerate, so for that hour the caller would otherwise judge eligibility on
+    newer data than it prices with. None when the rows predate the column, which
+    reproduces the old behaviour rather than guessing a vintage.
     """
     if _supabase is None:
-        return None
+        return None, None
     try:
         rows: list[dict] = []
         page = 1000
@@ -246,7 +255,7 @@ def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Option
         while True:
             resp = (
                 _supabase.table("player_predictions")
-                .select("player_id,event,predicted_points,generated_at")
+                .select("player_id,event,predicted_points,generated_at,through_gw")
                 .range(offset, offset + page - 1)
                 .execute()
             )
@@ -257,7 +266,7 @@ def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Option
             offset += page
         if not rows:
             logger.info("player_predictions table is empty — regenerating in-process")
-            return None
+            return None, None
 
         newest = max(r["generated_at"] for r in rows if r.get("generated_at"))
         newest_dt = datetime.fromisoformat(newest.replace("Z", "+00:00"))
@@ -267,9 +276,19 @@ def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Option
                 "player_predictions is %.1fh old (max %dh) — regenerating in-process",
                 age_hours, PREDICTIONS_TABLE_MAX_AGE_HOURS,
             )
-            return None
+            return None, None
 
         df = pd.DataFrame(rows).rename(columns={"player_id": "element"})
+
+        # Read the vintage off the newest run only. A purge failure can leave rows from an
+        # older run behind, and those carry an older through_gw — taking the max over
+        # everything would then claim a vintage no complete run actually produced.
+        through_gw = None
+        newest_rows = [r for r in rows if r.get("generated_at") == newest]
+        vintages = {r.get("through_gw") for r in newest_rows} - {None}
+        if vintages:
+            through_gw = int(min(vintages))
+
         df = df[["element", "event", "predicted_points"]]
         df["element"] = df["element"].astype(int)
         df["event"] = df["event"].astype(int)
@@ -289,13 +308,13 @@ def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Option
             df["hist_games"] = 0
 
         logger.info(
-            "Predictions from Supabase: %d rows, %d players, %.1fh old",
-            len(df), df["element"].nunique(), age_hours,
+            "Predictions from Supabase: %d rows, %d players, %.1fh old, through GW %s",
+            len(df), df["element"].nunique(), age_hours, through_gw,
         )
-        return df
+        return df, through_gw
     except Exception:
         logger.exception("player_predictions read failed — regenerating in-process")
-        return None
+        return None, None
 
 
 def _non_free_hit_squad_gw(last_gw: int, free_hit_gws: List[int], first_gw: int = 1) -> int:
@@ -884,14 +903,21 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     points_pred_gw_threshold = cfg.get_solver_params(solver_config).get("points_pred_gw_threshold")
     use_proxy = proxy_predict.should_use_proxy(bootstrap, points_pred_gw_threshold, DATA_DIR)
 
+    # The gameweek the predictions were built through, when they came from the table and
+    # therefore lag gw_data. None on every path where predictions and gw_data are already
+    # the same vintage: proxy predictions synthesize their own gw_data, and the in-process
+    # fallback is generated from this very frame.
+    predictions_through_gw: Optional[int] = None
+
     if use_proxy:
         gw_data = proxy_predict.synthesize_gw_data(bootstrap)
         predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
     else:
         gw_data = _get_gw_data(bootstrap)
-        predictions = _predictions_from_supabase(bootstrap, gw_data)
+        predictions, predictions_through_gw = _predictions_from_supabase(bootstrap, gw_data)
         if predictions is None:
             predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
+            predictions_through_gw = None
 
     # Every owned player must exist in the pool or the model is infeasible rather
     # than merely suboptimal — see ensure_players_present. Applied after
@@ -919,10 +945,15 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else 0.6
+    # max_gw holds the start filter to the same gameweek the points were priced from. The
+    # history sync lands an hour before predictions regenerate, so without this every sync
+    # opens an hour in which a player can clear the filter on a match his own prediction
+    # never saw — and that is exactly the match whose absence inflates him.
     watchlist = create_watchlist(
         predictions, gw_data,
         min_hist_pct=min_hist_pct, max_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
+        max_gw=predictions_through_gw,
     )
 
     if req.bucket_top_n:
@@ -1354,12 +1385,20 @@ async def generate_predictions_cron(secret: str = Query(...)):
     totals = predictions.groupby(["element", "event"], as_index=False)["predicted_points"].sum()
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    # The last gameweek of real history behind these numbers — the same value
+    # generate_predictions() derives internally as `last_played_gw`. Stamped on every row so
+    # a consumer can tell what this prediction could and could not have seen, rather than
+    # inferring it from `generated_at` and the sync schedule. The solver uses it to hold its
+    # eligibility filter to the same vintage; see create_watchlist's `max_gw`.
+    gw_col = "GW" if "GW" in gw_data.columns else "round"
+    through_gw = int(gw_data[gw_col].max())
     rows = [
         {
             "player_id": int(r.element),
             "event": int(r.event),
             "predicted_points": round(float(r.predicted_points), 2),
             "generated_at": generated_at,
+            "through_gw": through_gw,
         }
         for r in totals.itertuples()
     ]
