@@ -5,7 +5,8 @@ All data passed as parameters; no hardcoded file paths.
 
 import logging
 import math
-from typing import List, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -163,3 +164,63 @@ def create_watchlist(
         logger.info("Watchlist: %d players", len(watchlist_ids))
 
     return watchlist_ids
+
+
+# EXPERIMENTAL — opt-in only via the `bucket_top_n` request field; default
+# pipeline behaviour is unchanged when it's left unset.
+def apply_price_bucket_filter(
+    watchlist_ids: List[int],
+    predictions: pd.DataFrame,
+    bootstrap: Dict[str, Any],
+    current_gw: int,
+    horizon: int,
+    top_n: int,
+    must_include: Optional[List[int]] = None,
+) -> List[int]:
+    """
+    Further restrict an existing watchlist to the top `top_n` players per
+    (position, price-bucket) group, ranked by average predicted points over
+    the next `horizon` gameweeks starting at `current_gw`.
+
+    Price is bucketed to the nearest quarter-million at or above the player's
+    actual price (4.7 -> 4.75, 5.4 -> 5.5), so a group only ever contains
+    players a manager could swap for one another within budget.
+
+    must_include players (current squad, forced starts, extra_players) are
+    exempt and always kept, matching create_watchlist's own must_include
+    semantics — this is a further cut on top of that function's output, not a
+    replacement for it.
+    """
+    must_include_set = set(must_include or [])
+    watchlist_set = set(watchlist_ids)
+
+    element_type = {int(e["id"]): e.get("element_type") for e in bootstrap.get("elements", [])}
+    now_cost = {int(e["id"]): e.get("now_cost", 0) for e in bootstrap.get("elements", [])}
+
+    window_end = current_gw + horizon - 1
+    windowed = predictions[
+        (predictions["event"] >= current_gw) & (predictions["event"] <= window_end)
+    ]
+    avg_points = windowed.groupby("element")["predicted_points"].mean()
+
+    def bucket_key(pid: int) -> tuple:
+        return (element_type.get(pid), math.ceil(now_cost.get(pid, 0) / 10 * 4) / 4)
+
+    groups: Dict[tuple, List[tuple]] = defaultdict(list)
+    for pid in watchlist_ids:
+        if pid in must_include_set:
+            continue
+        groups[bucket_key(pid)].append((pid, float(avg_points.get(pid, 0.0))))
+
+    kept = watchlist_set & must_include_set
+    for members in groups.values():
+        members.sort(key=lambda m: -m[1])
+        kept.update(pid for pid, _ in members[:top_n])
+
+    filtered_ids = [pid for pid in watchlist_ids if pid in kept]
+    logger.info(
+        "Price-bucket filter: %d -> %d players (top %d per position/price bucket, "
+        "%d-GW horizon GW%d-GW%d)",
+        len(watchlist_ids), len(filtered_ids), top_n, horizon, current_gw, window_end,
+    )
+    return filtered_ids

@@ -41,7 +41,7 @@ from fpl.free_hit import (
     triple_captain_candidate_gws, find_best_triple_captain_gw,
     bench_boost_candidate_gws, find_best_bench_boost_gw,
 )
-from fpl.watchlist import create_watchlist
+from fpl.watchlist import create_watchlist, apply_price_bucket_filter
 from fpl.scenario_runner import build_solver, solve_scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -185,6 +185,13 @@ class OptimizeRequest(BaseModel):
     # sell for his market price, which over-states what a risen squad can raise.
     bank: Optional[float] = Field(default=None, ge=0, le=200)
     selling_prices: Optional[list[SellingPriceEntry]] = Field(default=None)
+    # ── Experimental: price-bucket watchlist filter (A/B test, not for prod use) ──
+    # When set, further restricts create_watchlist's output to the top
+    # `bucket_top_n` players per (position, price rounded up to the nearest
+    # quarter-million) group, ranked by average predicted points over the next
+    # `bucket_horizon` gameweeks. None (default) leaves the pipeline unchanged.
+    bucket_top_n: Optional[int] = Field(default=None, ge=1, le=50)
+    bucket_horizon: int = Field(default=5, ge=1, le=19)
 
 
 class SquadRequest(BaseModel):
@@ -825,6 +832,13 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         min_hist_pct=min_hist_pct, max_hist_window=6,
         must_include=must_include, must_exclude=req.excluded_players,
     )
+
+    if req.bucket_top_n:
+        watchlist = apply_price_bucket_filter(
+            watchlist, predictions, bootstrap,
+            current_gw=current_gw, horizon=req.bucket_horizon,
+            top_n=req.bucket_top_n, must_include=must_include,
+        )
 
     non_playing_tuples = [(e.player, list(e.gameweeks)) for e in req.non_playing if e.gameweeks] or None
 
