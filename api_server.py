@@ -55,8 +55,10 @@ POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 # How many top-scored (FH plan, BB GW, TC GW) candidates get re-solved as full
 # MILPs during the post-hoc chip placement — see run.py's mirror of this for
 # the rationale (find_best_bench_boost_gw / find_best_triple_captain_gw in
-# fpl/free_hit.py).
-CHIP_RESELECT_TOP_K = 5
+# fpl/free_hit.py). Cut from 5 to 3 on 2026-09-05 as part of the solve-time
+# work: the re-solve exists to catch BB's bench approximation, and the top-3
+# candidates were the only ones ever observed winning.
+CHIP_RESELECT_TOP_K = 3
 
 app = FastAPI(title="fpl-solver API", version="1.0.0")
 
@@ -192,6 +194,13 @@ class OptimizeRequest(BaseModel):
     # `bucket_horizon` gameweeks. None (default) leaves the pipeline unchanged.
     bucket_top_n: Optional[int] = Field(default=None, ge=1, le=50)
     bucket_horizon: int = Field(default=5, ge=1, le=19)
+    # Prune the Free Hit placement scenarios to the top K, ranked by the
+    # precomputed per-week FH benefit, before the expensive full solves — the
+    # same score-then-reselect treatment BB/TC placements already get. Measured
+    # 2026-09-05 across 4 teams: pruning to top-4 costs at most 0.2 points,
+    # because the candidate weeks are near-ties. None disables pruning (full
+    # enumeration); ignored when a specific FH week is forced.
+    fh_top_k: Optional[int] = Field(default=5, ge=1, le=50)
 
 
 class SquadRequest(BaseModel):
@@ -206,6 +215,87 @@ class SquadRequest(BaseModel):
 def _player_name(players: pd.DataFrame, pid: int) -> str:
     row = players[players["element"] == pid]
     return row["name"].iloc[0] if len(row) else str(pid)
+
+
+# A table read is trusted only this long past its generated_at before the
+# request falls back to regenerating in-process. The nightly cron rewrites the
+# table daily, and the fpl-lad freshness alert fires at 26h — so 30h means
+# "stale enough that the alert is already ringing", not a second opinion on it.
+PREDICTIONS_TABLE_MAX_AGE_HOURS = 30
+
+
+def _predictions_from_supabase(bootstrap: dict, gw_data: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Load the nightly cron's predictions from player_predictions instead of
+    regenerating them in-process (~25s of pandas per request for numbers that
+    only change once a day, and that Alfie is already reading from this table).
+
+    Returns None whenever the table can't serve the request — missing client,
+    empty table, stale rows, or any read error — and the caller falls back to
+    generate_predictions(), which is always current. The table stores summed
+    points per (player, gameweek); name/position/club come from bootstrap and
+    hist_games (60+ minute appearances, which create_watchlist aggregates) is
+    recounted from gw_data, so consumers see the same columns either way.
+    """
+    if _supabase is None:
+        return None
+    try:
+        rows: list[dict] = []
+        page = 1000
+        offset = 0
+        while True:
+            resp = (
+                _supabase.table("player_predictions")
+                .select("player_id,event,predicted_points,generated_at")
+                .range(offset, offset + page - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            rows.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
+        if not rows:
+            logger.info("player_predictions table is empty — regenerating in-process")
+            return None
+
+        newest = max(r["generated_at"] for r in rows if r.get("generated_at"))
+        newest_dt = datetime.fromisoformat(newest.replace("Z", "+00:00"))
+        age_hours = (datetime.now(timezone.utc) - newest_dt).total_seconds() / 3600
+        if age_hours > PREDICTIONS_TABLE_MAX_AGE_HOURS:
+            logger.warning(
+                "player_predictions is %.1fh old (max %dh) — regenerating in-process",
+                age_hours, PREDICTIONS_TABLE_MAX_AGE_HOURS,
+            )
+            return None
+
+        df = pd.DataFrame(rows).rename(columns={"player_id": "element"})
+        df = df[["element", "event", "predicted_points"]]
+        df["element"] = df["element"].astype(int)
+        df["event"] = df["event"].astype(int)
+
+        elements = bootstrap.get("elements", [])
+        name_map = {int(e["id"]): f"{e.get('first_name', '')} {e.get('second_name', '')}".strip() for e in elements}
+        pos_map = {int(e["id"]): POSITION_MAP.get(e.get("element_type", 0), "UNKNOWN") for e in elements}
+        club_map = {int(e["id"]): e.get("team") for e in elements}
+        df["name"] = df["element"].map(name_map)
+        df["position"] = df["element"].map(pos_map)
+        df["player_team_id"] = df["element"].map(club_map)
+
+        if "minutes" in gw_data.columns:
+            counts = gw_data[gw_data["minutes"] >= 60].groupby("element").size()
+            df["hist_games"] = df["element"].map(counts).fillna(0).astype(int)
+        else:
+            df["hist_games"] = 0
+
+        logger.info(
+            "Predictions from Supabase: %d rows, %d players, %.1fh old",
+            len(df), df["element"].nunique(), age_hours,
+        )
+        return df
+    except Exception:
+        logger.exception("player_predictions read failed — regenerating in-process")
+        return None
 
 
 def _non_free_hit_squad_gw(last_gw: int, free_hit_gws: List[int], first_gw: int = 1) -> int:
@@ -799,7 +889,9 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
     else:
         gw_data = _get_gw_data(bootstrap)
-        predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
+        predictions = _predictions_from_supabase(bootstrap, gw_data)
+        if predictions is None:
+            predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
 
     # Every owned player must exist in the pool or the model is infeasible rather
     # than merely suboptimal — see ensure_players_present. Applied after
@@ -906,6 +998,28 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             forced_lineup_players=forced_lineup_tuples,
             non_playing_players=non_playing_tuples,
         )
+
+    # Prune FH placements to the top fh_top_k by precomputed benefit. A
+    # scenario's final score is base_points + fh_benefits[gw] and the second
+    # term is already exact here, so the cheap rank only has to identify the
+    # cluster of good weeks — the full solves below still pick the winner
+    # among them. Skipped when a week is forced (the caller has already
+    # decided) and for scenarios without a Free Hit (always kept).
+    if req.fh_top_k is not None and fh_benefits and req.force_free_hit_gw is None:
+        fh_scens = [s for s in chip_scenarios if s["free_hit_gws"]]
+        if len(fh_scens) > req.fh_top_k:
+            def _fh_score(s: dict) -> float:
+                return sum(fh_benefits.get(g, {}).get("total_points", 0.0) for g in s["free_hit_gws"])
+            kept_ids = {id(s) for s in sorted(fh_scens, key=_fh_score, reverse=True)[:req.fh_top_k]}
+            dropped = [s["name"] for s in fh_scens if id(s) not in kept_ids]
+            chip_scenarios = [
+                s for s in chip_scenarios if not s["free_hit_gws"] or id(s) in kept_ids
+            ]
+            logger.info(
+                "FH pruning: kept top %d of %d FH placements by precomputed benefit "
+                "(%d scenarios remain); dropped: %s",
+                req.fh_top_k, len(fh_scens), len(chip_scenarios), dropped,
+            )
 
     best_result = None
     best_total = -float("inf")
