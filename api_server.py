@@ -150,10 +150,15 @@ class OptimizeRequest(BaseModel):
     # near-certain infeasibility and never what "start Palmer in GW27" meant. The solver
     # itself always took (player, [gws]) tuples; only this layer flattened them away.
     forced_lineup: list[ForcedLineupEntry] = Field(default_factory=list)
+    # "Never own this player." A player NOT in the current squad is dropped from the
+    # candidate pool. A player the manager DOES own stays in the pool but is banned
+    # inside the model, which forces a sale at the first legal transfer — removing an
+    # owned player from the pool instead leaves the squad-size constraint stuck at 14
+    # of 15 and every scenario infeasible. Exclusion wins over both `extra_players`
+    # (create_watchlist drops must_exclude before it exempts must_include) and a
+    # `forced_lineup` entry for the same player (the solver drops the forced start).
     excluded_players: list[int] = Field(default_factory=list)
     # Zero out these players' points for the listed GWs (injury/suspension/rotation).
-    # Note: `excluded_players` still wins over `extra_players` — create_watchlist drops
-    # must_exclude before it exempts must_include.
     non_playing: list[NonPlayingEntry] = Field(default_factory=list)
     # Force into the candidate pool even if they fail the min_hist_pct filter.
     extra_players: list[int] = Field(default_factory=list)
@@ -942,6 +947,15 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         + list(req.extra_players)
         + [e.player for e in req.forced_lineup]
     ))
+    # An excluded player the manager already OWNS must stay in the pool: dropping
+    # him removes his x variable, the squad-size constraint opens on 14 of 15, and
+    # every scenario is INFEASIBLE (observed: dev job f3d1faef, "replace Gabriel
+    # with VDV"). He is banned inside the model instead — kept sellable, never
+    # ownable past the first legal transfer. Non-owned exclusions keep the old
+    # treatment: out of the candidate pool entirely.
+    owned_set = set(current_squad)
+    banned_owned = [p for p in req.excluded_players if p in owned_set]
+    pool_exclude = [p for p in req.excluded_players if p not in owned_set]
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else 0.6
@@ -952,7 +966,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     watchlist = create_watchlist(
         predictions, gw_data,
         min_hist_pct=min_hist_pct, max_hist_window=6,
-        must_include=must_include, must_exclude=req.excluded_players,
+        must_include=must_include, must_exclude=pool_exclude,
         max_gw=predictions_through_gw,
     )
 
@@ -1020,12 +1034,13 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         chip_scenarios = chip_scenarios[:req.max_scenarios]
 
     forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
+    fh_watchlist = [p for p in watchlist if p not in set(banned_owned)]
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
         fh_benefits = calculate_free_hit_benefits_for_horizon(
             start_gw=current_gw, planning_horizon=horizon, budget=total_budget,
             predictions_df=predictions, gw_data_df=gw_data,
-            watchlist_players=watchlist,
+            watchlist_players=fh_watchlist,
             forced_lineup_players=forced_lineup_tuples,
             non_playing_players=non_playing_tuples,
         )
@@ -1064,6 +1079,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "points_multiplier": None,
         "forced_lineup": forced_lineup_tuples,
         "non_playing": non_playing_tuples,
+        "banned_players": banned_owned,
         "first_gw_penalty": -1,
         "sub_probability": 0.10,
         "predictions": predictions,

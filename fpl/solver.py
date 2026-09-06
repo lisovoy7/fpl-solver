@@ -53,6 +53,7 @@ class FPLSolver:
         points_multiplier_override: Optional[List[tuple]] = None,
         forced_lineup_players: Optional[List[tuple]] = None,
         non_playing_players: Optional[List[tuple]] = None,
+        banned_players: Optional[List[int]] = None,
         free_hit_gws: Optional[List[int]] = None,
         first_gw_transfer_penalty: Optional[float] = None,
         sub_probability: float = 0.0,
@@ -75,6 +76,12 @@ class FPLSolver:
             points_multiplier_override: List of (player_id, multiplier) tuples.
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
+            banned_players: Player IDs the plan must not own. A banned player the
+                manager already holds is sold at the first gameweek transfers are
+                possible, rather than being dropped from the model — removing an
+                owned player from the pool leaves the squad-size constraint stuck
+                at 14 of 15 and the whole model infeasible, which is exactly the
+                failure this parameter exists to avoid.
             free_hit_gws: Gameweeks where Free Hit is used.
             first_gw_transfer_penalty: Penalty for transfers in first GW.
             sub_probability: Probability lineup players won't play (bench valuation).
@@ -98,6 +105,7 @@ class FPLSolver:
         self.points_multiplier_override = points_multiplier_override or []
         self.forced_lineup_players = forced_lineup_players or []
         self.non_playing_players = non_playing_players or []
+        self.banned_players = banned_players or []
         self.free_hit_gws = free_hit_gws or []
         self.first_gw_transfer_penalty = first_gw_transfer_penalty if first_gw_transfer_penalty is not None else -1
         self.sub_probability = sub_probability
@@ -290,8 +298,11 @@ class FPLSolver:
             missing = [p for p in squad_player_ids if p not in pool_ids]
             if missing:
                 logger.warning(
-                    "%d initial squad players missing from player pool: %s "
-                    "(they will have 0 expected points in all GWs)",
+                    "%d initial squad players missing from player pool: %s — the "
+                    "squad-size constraint cannot be met without them, so every "
+                    "scenario will be INFEASIBLE. A missing player has no x "
+                    "variable to sell: the model opens on 14 owned players and "
+                    "can never reach 15.",
                     len(missing), missing,
                 )
 
@@ -819,10 +830,56 @@ class FPLSolver:
     def add_advanced_constraints(self) -> None:
         """Add advanced constraints (forced lineup, non-playing, BGW)."""
         logger.debug("Adding advanced constraints")
+        self._add_banned_player_constraints()
         self._add_forced_lineup_constraints()
         self._add_non_playing_player_constraints()
         self._add_bgw_constraints()
         logger.debug("Advanced constraints added")
+
+    def _add_banned_player_constraints(self) -> None:
+        """Forbid owning banned players, selling an already-owned one first.
+
+        x == 0 in every gameweek, EXCEPT gameweeks frozen by a Free Hit: the FH
+        weeks pin every transfer variable to zero, so the squad carries across
+        them unchanged and demanding x == 0 there would make any scenario whose
+        Free Hit lands before the sale infeasible. Skipping the frozen weeks
+        keeps every scenario solvable: with FH in the opening gameweek the sale
+        simply happens the week after.
+
+        For a player the manager owns, the squad-flow constraint then forces a
+        sale (r == 1) at the first non-frozen gameweek, crediting his selling
+        price — which is the whole point: "never own him" for an owned player
+        means "sell him", not "pretend he does not exist". A banned player
+        who is not owned simply can never be bought (x == 0 caps s at 0).
+        """
+        if not self.banned_players:
+            return
+
+        logger.debug("Adding banned player constraints")
+
+        fh_internal_gws = {
+            gw - self.start_gw + 1
+            for gw in self.free_hit_gws
+            if 1 <= gw - self.start_gw + 1 <= self.T
+        }
+
+        for player_id in self.banned_players:
+            if (player_id, 1) not in self.variables['x']:
+                # Not in the candidate pool at all — nothing to forbid.
+                continue
+            for t in range(1, self.T + 1):
+                if t in fh_internal_gws:
+                    continue
+                self.prob += (
+                    self.variables['x'][(player_id, t)] == 0,
+                    f"Banned_Player_{player_id}_GW{t}",
+                )
+            if player_id in (self.initial_squad or []):
+                logger.info(
+                    "Banned player %d is in the initial squad — the plan will sell "
+                    "him at the first gameweek transfers are possible",
+                    player_id,
+                )
 
     def _add_forced_lineup_constraints(self) -> None:
         """Add constraints to force specific players to start.
@@ -836,8 +893,22 @@ class FPLSolver:
         logger.debug("Adding forced lineup constraints")
 
         fh_gw_set = set(self.free_hit_gws)
+        banned = set(self.banned_players)
 
         for player_id, forced_gws in self.forced_lineup_players:
+            # Exclusion wins over a forced start — the pair is contradictory, and
+            # honouring both (y == 1 needs x == 1, the ban needs x == 0) would make
+            # every scenario infeasible. The watchlist used to arbitrate this by
+            # dropping excluded players from the pool, which silently skipped the
+            # forced start here; banned players stay in the pool now, so the same
+            # rule has to be stated explicitly.
+            if player_id in banned:
+                logger.warning(
+                    "Player %d is both banned and forced to start — exclusion wins, "
+                    "dropping the forced start",
+                    player_id,
+                )
+                continue
             player_name = "Unknown"
             if self.players is not None:
                 player_data = self.players[self.players['element'] == player_id]

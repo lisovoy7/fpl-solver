@@ -81,6 +81,7 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         points_multiplier_override=ctx["points_multiplier"],
         forced_lineup_players=ctx["forced_lineup"],
         non_playing_players=ctx["non_playing"],
+        banned_players=ctx.get("banned_players"),
         first_gw_transfer_penalty=ctx["first_gw_penalty"],
         sub_probability=ctx["sub_probability"],
         bench_boost_gw=scenario["bench_boost_gw"],
