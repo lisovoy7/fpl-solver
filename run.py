@@ -497,7 +497,13 @@ def main() -> None:
     # solver can actually start them (otherwise the constraint is silently
     # skipped if the player didn't pass the recent-minutes threshold).
     must_include.extend(pid for pid, _ in overrides.get("forced_lineup", []))
-    must_exclude = overrides.get("excluded_players", [])
+    # Owned exclusions stay in the pool and are banned inside the model instead —
+    # dropping an owned player's x variable leaves the squad-size constraint stuck
+    # at 14 of 15 and every scenario INFEASIBLE. Mirrors api_server.py exactly.
+    excluded_all = overrides.get("excluded_players", [])
+    owned_set = set(current_squad)
+    banned_owned = [p for p in excluded_all if p in owned_set]
+    must_exclude = [p for p in excluded_all if p not in owned_set]
     min_hist_pct = solver_params.get("min_hist_pct", 0.6)
     max_hist_window = solver_params.get("max_hist_window", 6)
 
@@ -615,7 +621,7 @@ def main() -> None:
         fh_benefits = calculate_free_hit_benefits_for_horizon(
             start_gw=current_gw, planning_horizon=horizon, budget=total_budget,
             predictions_df=predictions, gw_data_df=gw_data,
-            watchlist_players=watchlist,
+            watchlist_players=[p for p in watchlist if p not in set(banned_owned)],
             forced_lineup_players=overrides.get("forced_lineup"),
             points_multiplier_override=overrides.get("points_multiplier"),
             non_playing_players=overrides.get("non_playing"),
@@ -640,6 +646,7 @@ def main() -> None:
         "points_multiplier": overrides.get("points_multiplier"),
         "forced_lineup": overrides.get("forced_lineup"),
         "non_playing": overrides.get("non_playing"),
+        "banned_players": banned_owned,
         "first_gw_penalty": first_gw_penalty,
         "sub_probability": sub_probability,
         "predictions": predictions,
