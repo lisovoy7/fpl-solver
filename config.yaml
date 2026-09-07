@@ -46,6 +46,13 @@ solver:
   # yet) and the proxy model assumes every player starts — check the squad it picks.
   points_pred_gw_threshold: 1
 
+  # NOTE — these two (and the 60-minute appearance threshold) are read from
+  # Supabase app_config.player_eligibility when the solver runs as the deployed
+  # API, NOT from this file: fpl-lad's `player_eligibility` view reads the same
+  # row so Alfie's prediction rankings show the same players this pool would
+  # consider. These values apply to `run.py` on the command line only. Change
+  # both, or change the config row.
+  #
   # Fraction of the recent window a player must have started (60+ min) to enter
   # the candidate pool. Lower = more players (less reliable). Higher = fewer
   # players (more reliable). E.g. 0.6 = played 60+ min in >=60% of the window.

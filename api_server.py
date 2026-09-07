@@ -98,6 +98,61 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Candidate-pool eligibility parameters — shared with fpl-lad
+# ---------------------------------------------------------------------------
+
+# The values this filter used before it became configurable. Also what fpl-lad's
+# player_eligibility view falls back to, so a missing row degrades identically on
+# both sides rather than making them disagree.
+ELIGIBILITY_DEFAULTS = {"min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 60}
+_ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
+ELIGIBILITY_MAX_AGE_SECONDS = 300
+
+
+def _eligibility_config() -> dict:
+    """
+    create_watchlist's start-filter parameters, read from app_config.player_eligibility.
+
+    They live in Supabase rather than in this file because fpl-lad reads the same row:
+    its `player_eligibility` view reproduces this exact filter in SQL so Alfie's
+    prediction rankings show the same players the optimizer would consider. Hardcoding
+    0.6 in two languages meant a change here silently left Alfie recommending injured
+    squad players on the strength of a per-appearance estimate — which is what happened.
+    One row, both readers, no drift.
+
+    Falls back to the defaults on anything unexpected: this must never be the reason a
+    solve fails. Cached briefly, since it is read once per solve and changes about never.
+    """
+    age = time.time() - _ELIGIBILITY_CACHE["fetched_at"]
+    if _ELIGIBILITY_CACHE["value"] is not None and age < ELIGIBILITY_MAX_AGE_SECONDS:
+        return _ELIGIBILITY_CACHE["value"]
+
+    resolved = dict(ELIGIBILITY_DEFAULTS)
+    if _supabase is not None:
+        try:
+            resp = (
+                _supabase.table("app_config")
+                .select("value")
+                .eq("key", "player_eligibility")
+                .maybe_single()
+                .execute()
+            )
+            value = (getattr(resp, "data", None) or {}).get("value") or {}
+            if isinstance(value, dict):
+                for key, default in ELIGIBILITY_DEFAULTS.items():
+                    if key in value and value[key] is not None:
+                        resolved[key] = type(default)(value[key])
+        except Exception:
+            logger.exception("Could not read app_config.player_eligibility — using defaults")
+            resolved = dict(ELIGIBILITY_DEFAULTS)
+
+    _ELIGIBILITY_CACHE["value"] = resolved
+    _ELIGIBILITY_CACHE["fetched_at"] = time.time()
+    logger.info("Eligibility config: %s", resolved)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 
@@ -956,16 +1011,22 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     owned_set = set(current_squad)
     banned_owned = [p for p in req.excluded_players if p in owned_set]
     pool_exclude = [p for p in req.excluded_players if p not in owned_set]
+    # Parameters from app_config, not from this file — fpl-lad's player_eligibility view
+    # reads the same row so Alfie's prediction rankings and this candidate pool always
+    # mean the same thing by "worth considering". See _eligibility_config.
+    eligibility = _eligibility_config()
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
-    min_hist_pct = 0.0 if use_proxy else 0.6
+    min_hist_pct = 0.0 if use_proxy else eligibility["min_hist_pct"]
     # max_gw holds the start filter to the same gameweek the points were priced from. The
     # history sync lands an hour before predictions regenerate, so without this every sync
     # opens an hour in which a player can clear the filter on a match his own prediction
     # never saw — and that is exactly the match whose absence inflates him.
     watchlist = create_watchlist(
         predictions, gw_data,
-        min_hist_pct=min_hist_pct, max_hist_window=6,
+        min_hist_pct=min_hist_pct,
+        max_hist_window=eligibility["max_hist_window"],
+        min_minutes=eligibility["min_minutes"],
         must_include=must_include, must_exclude=pool_exclude,
         max_gw=predictions_through_gw,
     )

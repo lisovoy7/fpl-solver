@@ -18,6 +18,7 @@ def create_watchlist(
     gw_data: pd.DataFrame,
     min_hist_pct: float = 0.6,
     max_hist_window: int = 6,
+    min_minutes: int = 60,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,
     max_gw: Optional[int] = None,
@@ -29,11 +30,16 @@ def create_watchlist(
         predictions: Full predictions (element, name, position, predicted_points, hist_games).
         gw_data: Current season GW data (element, value, GW for costs).
         min_hist_pct: Fraction of the recent window a player must have started
-            (60+ min) to enter the candidate pool, e.g. 0.6 = 60%.
+            (`min_minutes`+ min) to enter the candidate pool, e.g. 0.6 = 60%.
         max_hist_window: Upper bound on how many recent GWs are considered. Early
             in the season, before this many GWs exist, the window shrinks to
             however many GWs have actually been played — there is no lower bound,
             so a single-GW season still lets qualifying players through.
+        min_minutes: Minutes in a fixture that count as an appearance. A parameter
+            rather than a literal 60 because fpl-lad's `player_eligibility` view
+            reproduces this same filter for Alfie's answers from a shared config row
+            (app_config.player_eligibility), and the two must not be able to disagree
+            about what an appearance is.
         must_include: Player IDs to always include (e.g. current squad).
         must_exclude: Player IDs to always exclude.
         max_gw: Last gameweek the eligibility window may see. Defaults to whatever
@@ -70,7 +76,7 @@ def create_watchlist(
         if dropped:
             logger.info("Excluded players dropped from must_include: %s", sorted(dropped))
 
-    # 1. Count recent 60+ min appearances within the last `window_size` GWs,
+    # 1. Count recent `min_minutes`+ appearances within the last `window_size` GWs,
     #    where window_size is capped at max_hist_window but shrinks to whatever
     #    GWs actually exist early in the season.
     gw_col = "GW" if "GW" in gw_data.columns else None
@@ -88,7 +94,7 @@ def create_watchlist(
         recent_gw = gw_data[
             (gw_data[gw_col] >= window_start)
             & (gw_data[gw_col] <= window_end)
-            & (gw_data["minutes"] >= 60)
+            & (gw_data["minutes"] >= min_minutes)
         ]
         recent_counts = recent_gw.groupby("element").size().reset_index(name="recent_hist_games")
         min_hist_games = math.ceil(window_size * min_hist_pct)
@@ -99,9 +105,9 @@ def create_watchlist(
             )
         logger.info(
             "Recent window: GW %d-%d (%d GWs), requiring >= %d appearances (%.0f%%), "
-            "%d players with 60+ min appearances",
+            "%d players with %d+ min appearances",
             window_start, window_end, window_size, min_hist_games, min_hist_pct * 100,
-            len(recent_counts),
+            len(recent_counts), min_minutes,
         )
     else:
         logger.warning("No GW column in gw_data — falling back to all-time hist_games")
