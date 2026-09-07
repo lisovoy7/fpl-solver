@@ -6,7 +6,7 @@ no hardcoded file paths, season strings, or file I/O in business logic.
 """
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,50 @@ logger = logging.getLogger(__name__)
 # Constants
 MIN_MINUTES = 60
 LAST_N_GAMES = 6
+
+# Outlier cap + shrinkage, applied to the two spiky attacking components only.
+#
+# A 6-game window of xG takes a median 52% of its total from its single biggest
+# game (xA: 49%); saves, xGC and defensive contribution sit near 27%, so they are
+# left alone. Two separate failures follow from that spikiness and each needs its
+# own correction:
+#
+#   1. Too few games. One 60-minute appearance was enough to make Hinshelwood the
+#      highest-rated player in the league (1.31 normalised xG, 2026-27 GW3).
+#      SHRINK_K pulls every average toward its positional prior, hard when the
+#      window is thin and barely at all when it is full.
+#   2. A full window with one freak game. Watkins had six games last season and
+#      one of them normalised to 4.22 — more than the other five combined, and
+#      no amount of "how many games" catches it. CAP_TO_SECOND_HIGHEST replaces
+#      that single observation with the second-highest in the window.
+#
+# The cap needs CAP_MIN_GAMES, and 4 is not arbitrary: capping a 2-game window is
+# the same as keeping only the worse game, and across the league it strips a
+# median 90% of the average at 2 games and 62% at 3. Below the threshold
+# shrinkage alone does the work.
+SHRINK_K = 3.0
+CAP_MIN_GAMES = 4
+SHRUNK_COMPONENTS = ("norm_expected_goals", "norm_expected_assists")
+
+# Bonus points get the same shrinkage and a much larger k, because they carry far
+# less signal than xG: for the median player the ENTIRE 6-game bonus average comes
+# from one game, and the first half of a window predicts the second at r=0.03.
+#
+# Measured on 2025-26 across six snapshot gameweeks, scored against what each
+# player actually averaged over his following six games, the current
+# straight-average estimator came LAST of nine (mean absolute error 0.326 vs 0.297
+# at k=3, 0.280 at k=10, 0.277 at k=20) — and lost in all six snapshots. Using the
+# positional average alone and ignoring the player's own history entirely scores
+# 0.280, i.e. his bonus record is worth less than nothing.
+#
+# 10 takes essentially all of that gain while leaving ~1/3 of the weight on the
+# player, which is what keeps a genuine bonus magnet distinguishable. Going
+# further measures marginally better and reads worse: Bruno Fernandes on
+# [0,0,3,0,3,3] went on to average 1.33, and k=20 would price him at 0.58.
+#
+# No cap here — capping a mostly-zero series is meaningless, and its one non-zero
+# game is the only information in it.
+BONUS_SHRINK_K = 10.0
 
 GOAL_POINTS = {"GK": 10, "DEF": 6, "MID": 5, "FWD": 4}
 
@@ -159,13 +203,98 @@ def _normalize_stats(
     return merged
 
 
+def _cap_top_observation(values: np.ndarray, min_games: int = CAP_MIN_GAMES) -> np.ndarray:
+    """
+    Replace the single largest observation with the second largest.
+
+    Capping rather than dropping is deliberate. Deleting the best game taxes every
+    player for having one: measured on 2025-26, deleting cost Haaland 19% of his
+    average and Salah 12%, where capping cost them 4% and 3% — while still taking
+    40% off Watkins and 65% off Diallo, whose windows are one game and five
+    blanks. It also keeps the sample size, so nothing downstream has to cope with
+    a 6-game window that turned into 5.
+
+    A window shorter than `min_games` is returned untouched (see CAP_MIN_GAMES).
+    Ties at the top are a no-op by construction: a value repeated twice is not an
+    outlier.
+    """
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < max(2, min_games):
+        return arr
+    order = np.argsort(arr)
+    capped = arr.copy()
+    capped[order[-1]] = arr[order[-2]]
+    return capped
+
+
+def _positional_priors(
+    normalized_stats: pd.DataFrame,
+    columns: Sequence[str] = SHRUNK_COMPONENTS,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Per-game league average of each component, by position, from this run's own data.
+
+    Pooled over every 60+ minute game in `normalized_stats`, not just the tail
+    windows — same answer, more observations, and it does not wobble when a
+    rotated player drops out of a window.
+
+    Deliberately NOT persisted anywhere. It is eight numbers derived from exactly
+    the data the player averages are derived from, so computing it here is what
+    guarantees the two describe the same league. A stored prior would be a vintage
+    that can go stale against the averages it corrects, which is the same class of
+    bug as judging eligibility on today's data and points on yesterday's.
+
+    The prior needs far less evidence than any individual: through GW3 of 2026-27
+    the midfield xG prior sits on 264 player-games, and it moves very little all
+    season (0.137 → 0.128 → 0.136 → 0.137 across GW3/10/20/36 of 2025-26).
+
+    Returns {column: {position: mean, "": pooled mean as fallback}}.
+    """
+    priors: Dict[str, Dict[str, float]] = {}
+    for col in columns:
+        if col not in normalized_stats.columns:
+            continue
+        series = pd.to_numeric(normalized_stats[col], errors="coerce")
+        by_pos: Dict[str, float] = {}
+        if "position" in normalized_stats.columns:
+            grouped = series.groupby(normalized_stats["position"]).mean()
+            by_pos = {str(k): float(v) for k, v in grouped.items() if pd.notna(v)}
+        overall = float(series.mean()) if len(series) else 0.0
+        by_pos[""] = 0.0 if pd.isna(overall) else overall
+        priors[col] = by_pos
+        logger.info(
+            "Prior (per game, by position) for %s: %s",
+            col,
+            {k: round(v, 4) for k, v in sorted(by_pos.items()) if k},
+        )
+    return priors
+
+
 def _calculate_player_averages(
     normalized_stats: pd.DataFrame,
     gw_data: pd.DataFrame,
     last_n_games: int = LAST_N_GAMES,
+    shrink_k: float = SHRINK_K,
+    cap_min_games: int = CAP_MIN_GAMES,
+    bonus_shrink_k: float = BONUS_SHRINK_K,
 ) -> pd.DataFrame:
     """
     Calculate player averages from last N games (normalized and raw components).
+
+    `norm_expected_goals` and `norm_expected_assists` are capped and shrunk here
+    (see SHRINK_K / CAP_MIN_GAMES) rather than downstream, because this is the
+    last point at which the per-game observations still exist — by
+    _create_component_predictions there is only an average left, and an average
+    cannot be told apart from the same average made of one game and five blanks.
+
+    Order matters and is fixed: normalise each game by its own fixture, take the
+    window, cap the outlier, shrink toward the prior. Only then does
+    _create_component_predictions multiply by the TARGET fixture's difficulty. The
+    unshrunk means are kept alongside as `*_unshrunk` for diagnostics; nothing
+    reads them, and they are why a trace can show what the correction did.
+
+    `shrink_k=0` with `cap_min_games` above the window length reproduces the
+    pre-2026-09-07 behaviour exactly, which is what the backtest sweeps against.
     """
     logger.debug("Calculating player averages from last %d games", last_n_games)
 
@@ -175,6 +304,8 @@ def _calculate_player_averages(
         if col in gw_filtered.columns:
             gw_filtered[col] = pd.to_numeric(gw_filtered[col], errors="coerce").fillna(0)
     stats_sorted = normalized_stats.sort_values(["element", "kickoff_time"])
+    priors = _positional_priors(stats_sorted, SHRUNK_COMPONENTS)
+    bonus_priors = _positional_priors(gw_filtered, ("bonus",)).get("bonus", {})
 
     records = []
     for element, group in stats_sorted.groupby("element"):
@@ -192,25 +323,54 @@ def _calculate_player_averages(
                 if "bonus" in recent_gw.columns
                 else 0.0
             )
+            bonus_games = len(recent_gw) if "bonus" in recent_gw.columns else 0
         else:
             avg_def = 0.0
             def_history = []
             avg_bonus = 0.0
+            bonus_games = 0
+
+        position = (
+            str(recent["position"].iloc[-1])
+            if "position" in recent.columns and pd.notna(recent["position"].iloc[-1])
+            else ""
+        )
+        corrected = {}
+        for col in SHRUNK_COMPONENTS:
+            if col not in recent.columns:
+                corrected[col] = (0.0, 0.0)
+                continue
+            values = pd.to_numeric(recent[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            unshrunk = float(values.mean()) if len(values) else 0.0
+            capped = float(_cap_top_observation(values, cap_min_games).mean()) if len(values) else 0.0
+            prior = priors.get(col, {}).get(position)
+            if prior is None:
+                prior = priors.get(col, {}).get("", 0.0)
+            shrunk = (
+                (len(values) * capped + shrink_k * prior) / (len(values) + shrink_k)
+                if len(values)
+                else prior
+            )
+            corrected[col] = (float(shrunk), unshrunk)
+
+        bonus_prior = bonus_priors.get(position)
+        if bonus_prior is None:
+            bonus_prior = bonus_priors.get("", 0.0)
+        shrunk_bonus = (
+            (bonus_games * avg_bonus + bonus_shrink_k * bonus_prior)
+            / (bonus_games + bonus_shrink_k)
+            if bonus_shrink_k > 0 or bonus_games
+            else avg_bonus
+        )
 
         records.append(
             {
                 "element": element,
                 "hist_games": hist_games,
-                "avg_norm_expected_goals": (
-                    recent["norm_expected_goals"].mean()
-                    if "norm_expected_goals" in recent.columns
-                    else 0.0
-                ),
-                "avg_norm_expected_assists": (
-                    recent["norm_expected_assists"].mean()
-                    if "norm_expected_assists" in recent.columns
-                    else 0.0
-                ),
+                "avg_norm_expected_goals": corrected["norm_expected_goals"][0],
+                "avg_norm_expected_goals_unshrunk": corrected["norm_expected_goals"][1],
+                "avg_norm_expected_assists": corrected["norm_expected_assists"][0],
+                "avg_norm_expected_assists_unshrunk": corrected["norm_expected_assists"][1],
                 "avg_norm_saves": (
                     recent["norm_saves"].mean()
                     if "norm_saves" in recent.columns
@@ -227,7 +387,8 @@ def _calculate_player_averages(
                     else 0.0
                 ),
                 "avg_defensive_contribution": avg_def,
-                "avg_bonus_points": avg_bonus,
+                "avg_bonus_points": float(shrunk_bonus),
+                "avg_bonus_points_unshrunk": float(avg_bonus),
                 "defensive_contribution_history": def_history,
             }
         )
@@ -609,6 +770,9 @@ def generate_predictions(
     multipliers: pd.DataFrame,
     team_tiers: pd.DataFrame,
     season: str,
+    shrink_k: float = SHRINK_K,
+    cap_min_games: int = CAP_MIN_GAMES,
+    bonus_shrink_k: float = BONUS_SHRINK_K,
 ) -> pd.DataFrame:
     """
     Generate component-based FPL point predictions for all players and future fixtures.
@@ -622,6 +786,10 @@ def generate_predictions(
                      player_team_tier, opponent_team_tier, is_home, multiplier.
         team_tiers: Team metadata with team_id, team_tier, team_name (optional).
         season: Season string (e.g. '2025-26').
+        shrink_k: Strength of the pull toward the positional prior for xG/xA,
+                  in units of games. 0 disables it. See SHRINK_K.
+        cap_min_games: Shortest window the outlier cap may touch. See CAP_MIN_GAMES.
+        bonus_shrink_k: Same, for bonus points. 0 disables it. See BONUS_SHRINK_K.
 
     Returns:
         DataFrame with columns: element, name, position, player_team_id, player_team_tier,
@@ -631,7 +799,14 @@ def generate_predictions(
     logger.info("Generating predictions for season %s", season)
 
     normalized = _normalize_stats(gw_data, fixtures, multipliers, team_tiers, season)
-    player_averages = _calculate_player_averages(normalized, gw_data, LAST_N_GAMES)
+    player_averages = _calculate_player_averages(
+        normalized,
+        gw_data,
+        LAST_N_GAMES,
+        shrink_k=shrink_k,
+        cap_min_games=cap_min_games,
+        bonus_shrink_k=bonus_shrink_k,
+    )
     player_assignments = _get_player_team_assignments(normalized)
 
     gw_col = "GW" if "GW" in gw_data.columns else "round"
