@@ -35,7 +35,7 @@ _CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
-from fpl.solver import FPLSolver, TRANSFER_PENALTY_POINTS
+from fpl.solver import FPLSolver, FPL_TRANSFER_COST, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import (
     generate_chip_scenarios, calculate_free_hit_benefits_for_horizon,
     triple_captain_candidate_gws, find_best_triple_captain_gw,
@@ -675,8 +675,15 @@ def _format_solution(
         }
         gameweeks_output.append(gw_entry)
 
+    # The MILP is charged TRANSFER_PENALTY_POINTS a hit, which is deliberately stiffer
+    # than the -4 FPL bills (see fpl/solver.py). That is a brake on churn, not a price,
+    # so the total reported here is re-charged at the real cost - otherwise every points
+    # figure a user sees would be short by the difference on every hit in the plan.
+    paid_total = sum(gw["paid_transfers"] for gw in gameweeks_output)
+    reported_points = total_points + (FPL_TRANSFER_COST - TRANSFER_PENALTY_POINTS) * paid_total
+
     return {
-        "objective": round(total_points, 1),
+        "objective": round(reported_points, 1),
         "scenario": scenario_name,
         "start_gw": start_gw,
         "end_gw": start_gw + solver.T - 1,
