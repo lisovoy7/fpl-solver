@@ -15,6 +15,7 @@ Predictions and player data are passed as DataFrames - no hardcoded file paths.
 """
 
 import logging
+import os
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -30,7 +31,17 @@ TOTAL_SQUAD_SIZE = 15
 TOTAL_LINEUP_SIZE = 11
 MAX_PLAYERS_PER_CLUB = 3
 MAX_FREE_TRANSFERS = 5
-TRANSFER_PENALTY_POINTS = -4
+# What FPL actually bills for a transfer beyond the free ones. Reporting only -
+# every points total that reaches a user is charged at this, never at the planning
+# figure below.
+FPL_TRANSFER_COST = -4.0
+# What the *model* is charged when it decides to make one. Deliberately stiffer than
+# the real -4: at the true price the optimizer buys tiny predicted edges with hits,
+# and those edges are inside the noise of a per-appearance prediction. Measured on
+# the 5 teams of league 237688 whose plan paid for a transfer, moving -4 to -6 cut
+# the gameweek's hits from -44 to -16 across them while costing 0.3-1.6 points each
+# over 16 gameweeks, scored back at the real price. Override for experiments.
+TRANSFER_PENALTY_POINTS = float(os.environ.get("FPL_TRANSFER_PENALTY", -6))
 FREE_HIT_TRANSFER_PENALTY = -1000
 CHIP_WINDOWS = {'first_half': (1, 19), 'second_half': (20, 38)}
 
