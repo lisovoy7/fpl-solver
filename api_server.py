@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1376,15 +1377,33 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     return result
 
 
-@app.post("/api/optimize-async", status_code=202)
+@app.post("/api/optimize-async")
 async def optimize_async(
     req: OptimizeRequest,
-    background_tasks: BackgroundTasks,
     job_id: str = Query(..., description="UUID of the solver_jobs row to update"),
 ):
-    """Start optimization in background; returns 202 immediately. Result written to Supabase."""
-    background_tasks.add_task(_run_and_store, req, job_id)
-    return Response(status_code=202)
+    """
+    Run the optimization inside this request and persist the result to Supabase.
+
+    This used to hand the solve to a BackgroundTask and answer 202 at once. That forced
+    the service onto instance-based billing (`cpu-throttling=false`): under Cloud Run's
+    default request-based billing the CPU is throttled to nothing the moment the response
+    has gone, and a background solve stalls. Instance-based billing charges for the whole
+    life of the instance, and Cloud Run keeps one warm ~12-15 minutes after its last work
+    — measured on fpl-solver-dev 2026-09-09: 9.7 billable instance-hours for 2.9 hours of
+    actual solving. Doing the work inside the request is what lets the service go back to
+    request-based billing, where that idle time is free.
+
+    Nobody waits on this response. fpl-lad fires the request and never reads the body —
+    progress and the result travel through `solver_jobs` — so the status code is
+    informational, and a rejected payload still 422s before any of this runs. The one
+    thing the caller must do is keep the request timeout above a long solve (900s).
+
+    Runs in the threadpool, not on the event loop: `_run_and_store` is minutes of
+    synchronous CPU work, and a blocked loop would take /api/health down with it.
+    """
+    await run_in_threadpool(_run_and_store, req, job_id)
+    return {"ok": True, "job_id": job_id}
 
 
 # ---------------------------------------------------------------------------
