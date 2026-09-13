@@ -105,7 +105,7 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 # The values this filter used before it became configurable. Also what fpl-lad's
 # player_eligibility view falls back to, so a missing row degrades identically on
 # both sides rather than making them disagree.
-ELIGIBILITY_DEFAULTS = {"min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 60}
+ELIGIBILITY_DEFAULTS = {"min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 45}
 _ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 ELIGIBILITY_MAX_AGE_SECONDS = 300
 
@@ -297,7 +297,7 @@ def _predictions_from_supabase(
     client, empty table, stale rows, or any read error — and the caller falls
     back to generate_predictions(), which is always current. The table stores
     summed points per (player, gameweek); name/position/club come from bootstrap
-    and hist_games (60+ minute appearances, which create_watchlist aggregates) is
+    and hist_games (appearances of app_config's min_minutes+, which create_watchlist aggregates) is
     recounted from gw_data, so consumers see the same columns either way.
 
     The second element is the run's `through_gw` — the last gameweek of played
@@ -363,7 +363,16 @@ def _predictions_from_supabase(
         df["player_team_id"] = df["element"].map(club_map)
 
         if "minutes" in gw_data.columns:
-            counts = gw_data[gw_data["minutes"] >= 60].groupby("element").size()
+            # Read the threshold, never write it here. This was a literal 60 while the
+            # same number lived in app_config, watchlist.py and predict.py — four copies
+            # of one rule, so lowering it to 45 in config would have moved three of them
+            # and left this one quietly counting something else.
+            appearance_minutes = _eligibility_config()["min_minutes"]
+            counts = (
+                gw_data[gw_data["minutes"] >= appearance_minutes]
+                .groupby("element")
+                .size()
+            )
             df["hist_games"] = df["element"].map(counts).fillna(0).astype(int)
         else:
             df["hist_games"] = 0

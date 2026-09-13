@@ -15,7 +15,15 @@ from scipy import stats
 logger = logging.getLogger(__name__)
 
 # Constants
-MIN_MINUTES = 60
+#
+# 45, not 60, since 2026-09-13. The old value asked "did he effectively play the match",
+# which silently discarded a half's worth of real evidence: a player subbed at half time
+# had his appearance dropped from the window entirely, and Ben White's Sunderland match is
+# the worked example a few lines below. It also drew the line in the wrong place for how
+# the game is now managed — a 45-to-60 minute outing is an ordinary rotation, not a
+# non-appearance. It is deliberately a MINUTES test and not a `starts` test, so a
+# substitute who plays 45+ counts exactly like a man who started and was withdrawn.
+MIN_MINUTES = 45
 LAST_N_GAMES = 6
 
 # Outlier cap + shrinkage, applied to the two spiky attacking components only.

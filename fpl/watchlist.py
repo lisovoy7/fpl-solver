@@ -12,13 +12,43 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# How long after kickoff a fixture is assumed to be over: 90 min + halftime + stoppage,
+# plus margin. Same value, and the same reason, as fpl-lad's agent/gw-status.ts and its
+# fpl-sync history filter.
+#
+# It is a time test and NOT FPL's `finished` flag on purpose: `finished` means BONUS IS
+# FINAL, not "this match was played", and stays false until the whole gameweek closes.
+# Measured 2026-09-13, all seven GW4 matches played the day before were still
+# `finished: false`. Treating that as "not played" would zero out a club's opportunities
+# for its own completed matches — the exact inverse of the bug this guards.
+ASSUMED_MATCH_DURATION = pd.Timedelta(minutes=135)
+
+
+def _played_only(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rows whose fixture has actually been played.
+
+    Falls back to returning everything when there is no usable `kickoff_time` — the
+    pre-season proxy path synthesises rows without one, and there a permissive filter is
+    correct anyway (the window is empty and eligibility is effectively off).
+    """
+    if "kickoff_time" not in df.columns or df.empty:
+        return df
+    kickoff = pd.to_datetime(df["kickoff_time"], errors="coerce", utc=True)
+    if kickoff.isna().all():
+        return df
+    cutoff = pd.Timestamp.now(tz="UTC") - ASSUMED_MATCH_DURATION
+    # A row we cannot date is kept: dropping it would silently shrink a club's
+    # opportunities, which is the direction that wrongly excludes players.
+    return df[kickoff.isna() | (kickoff <= cutoff)]
+
 
 def create_watchlist(
     predictions: pd.DataFrame,
     gw_data: pd.DataFrame,
     min_hist_pct: float = 0.6,
     max_hist_window: int = 6,
-    min_minutes: int = 60,
+    min_minutes: int = 45,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,
     max_gw: Optional[int] = None,
@@ -91,27 +121,74 @@ def create_watchlist(
         # The upper bound is new alongside `max_gw`: without it a clamped window still
         # counts appearances from gameweeks the predictions never saw, which is the exact
         # mismatch this exists to close.
-        recent_gw = gw_data[
-            (gw_data[gw_col] >= window_start)
-            & (gw_data[gw_col] <= window_end)
-            & (gw_data["minutes"] >= min_minutes)
+        in_window = gw_data[
+            (gw_data[gw_col] >= window_start) & (gw_data[gw_col] <= window_end)
         ]
-        recent_counts = recent_gw.groupby("element").size().reset_index(name="recent_hist_games")
+
+        # Only fixtures that have actually been PLAYED count — as opportunities or as
+        # anything else. FPL publishes a player's row for an upcoming fixture on matchday,
+        # minutes 0, and it is indistinguishable from a match he was left out of. fpl-lad's
+        # sync drops those now, but this path must not depend on that having run: the
+        # nightly cron lands at 11PM, so for the whole of a matchday the table still holds
+        # them. `kickoff_time` is on every row from both real sources.
+        played = _played_only(in_window)
+
+        # The denominator is per player, and it is the number of fixtures his CLUB has
+        # played — not the width of the window.
+        #
+        # It used to be `ceil(window_size * min_hist_pct)`, one number for the whole league,
+        # which quietly punishes anyone whose club has played fewer matches than the window
+        # is wide. On 2026-09-13, with seven of ten GW4 fixtures played, the window was 4
+        # for everybody: a player whose own club had not kicked off yet needed 3 starts from
+        # the 2 matches he had had the chance to start. 19 players were dropped from the
+        # candidate pool that way — Foden, Cherki, Dalot, Rashford, O'Reilly, Mainoo — hours
+        # before their match began. A blank gameweek and a postponement did the same thing,
+        # all season, to every player at the affected club.
+        #
+        # FPL's element-summary gives every player at a club a row for each of that club's
+        # fixtures, whether he featured or not, so counting his rows in the window IS his
+        # club's played-fixture count — no team column needed, and a mid-season transfer is
+        # handled for free (he can only be charged for matches he was there for).
+        #
+        # This mirrors `fixtures_in_window` in fpl-lad's player_eligibility view, so the two
+        # sides keep meaning the same thing by "worth considering". The shared thresholds
+        # still come from app_config.player_eligibility.
+        #
+        # `proxy_predict.ensure_players_present()` synthesises minutes=0 rows for squad
+        # members missing from gw_data, and those would read as an extra opportunity here.
+        # It is harmless because it only ever covers must_include players, and step 6
+        # exempts those from this filter entirely — but it is the reason to keep that
+        # exemption in front of this, not behind it.
+        opportunities = played.groupby("element").size()
+        recent_counts = (
+            played[played["minutes"] >= min_minutes]
+            .groupby("element")
+            .size()
+            .reset_index(name="recent_hist_games")
+        )
+        required_by_element = (
+            (opportunities * min_hist_pct).apply(math.ceil).astype(int)
+        )
+        # Kept only for the log line and for callers that still read it: the league-wide
+        # requirement a club playing every gameweek in the window would face.
         min_hist_games = math.ceil(window_size * min_hist_pct)
         if max_gw is not None and window_end < data_max_gw:
             logger.info(
                 "Eligibility clamped to GW %d (the predictions' vintage) — gw_data holds GW %d",
                 window_end, data_max_gw,
             )
+        short = int((opportunities < window_size).sum())
         logger.info(
-            "Recent window: GW %d-%d (%d GWs), requiring >= %d appearances (%.0f%%), "
-            "%d players with %d+ min appearances",
-            window_start, window_end, window_size, min_hist_games, min_hist_pct * 100,
-            len(recent_counts), min_minutes,
+            "Recent window: GW %d-%d (%d GWs), requiring >= %.0f%% of each club's PLAYED "
+            "fixtures (%d for a club that played them all), %d players with %d+ min "
+            "appearances, %d players at clubs short of the full window",
+            window_start, window_end, window_size, min_hist_pct * 100, min_hist_games,
+            len(recent_counts), min_minutes, short,
         )
     else:
         logger.warning("No GW column in gw_data — falling back to all-time hist_games")
         recent_counts = None
+        required_by_element = None
         min_hist_games = 0
 
     # 2. Total expected points per player
@@ -178,8 +255,15 @@ def create_watchlist(
                 skipped_ids,
             )
 
-    # 7. Filter remaining by recent_hist_games >= min_hist_games
-    filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
+    # 7. Filter remaining by appearances against that player's OWN requirement. A player
+    #    with no row in the window at all has no opportunities, so his requirement is 0 and
+    #    he passes on 0 appearances — same as the pre-season case where the window is empty
+    #    and the filter is effectively off. He still needs a prediction to be in `merged`.
+    if required_by_element is not None:
+        required = remaining["element"].map(required_by_element).fillna(0).astype(int)
+        filtered = remaining[remaining["recent_hist_games"] >= required]
+    else:
+        filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
 
     # 8. Combine and deduplicate
     combined = pd.concat([filtered, must_include_df], ignore_index=True)
