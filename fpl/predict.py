@@ -62,6 +62,28 @@ SHRUNK_COMPONENTS = ("norm_expected_goals", "norm_expected_assists")
 # game is the only information in it.
 BONUS_SHRINK_K = 10.0
 
+# Conceding is a team event, not a personal one. FPL's per-player
+# `expected_goals_conceded` is the opposition xG accumulated *while that player was
+# on the pitch*, so for anyone who played the full 90 it IS the team's figure and
+# for everyone else it is a fraction of it. Averaging it per player therefore
+# measured availability, not defence: at 2026-27 GW4 Arsenal's whole XI carried
+# 1.64 from the Sunderland match, while Ben White — subbed at half time — carried
+# 0.13, and because MIN_MINUTES then dropped his 45-minute game from his window
+# entirely he was priced for a clean sheet at 2.78 against Gabriel's 2.02. Two
+# centre-backs, same club, same fixture, a 27% gap invented by a substitution.
+#
+# So the xGC that feeds `conceded_goals` and `clean_sheet` is rebuilt per CLUB over
+# the club's own last TEAM_XGC_LAST_N matches, and every player at that club
+# inherits it whether or not he featured in any of them. Both components are
+# per-appearance estimates — what a player is worth IF he plays — so "was he on the
+# pitch last month" has no business in them; whether he plays at all is the
+# minutes/eligibility question, answered elsewhere.
+#
+# A match's team xGC is the MAX across that club's players in the fixture, which is
+# exact rather than approximate: a 90-minute player's value is the whole match by
+# construction, and nobody can exceed it.
+TEAM_XGC_LAST_N = LAST_N_GAMES
+
 GOAL_POINTS = {"GK": 10, "DEF": 6, "MID": 5, "FWD": 4}
 
 NORMALIZABLE_COMPONENTS = [
@@ -398,6 +420,123 @@ def _calculate_player_averages(
     return df
 
 
+def _team_match_xgc(
+    gw_data: pd.DataFrame, fixtures: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    One row per (club, match): the whole match's expected goals conceded.
+
+    Taken as the MAX of `expected_goals_conceded` across that club's players in the
+    fixture, which is exact and not an estimate — the stat accumulates only while a
+    player is on the pitch, so anyone who played 90 minutes carries the full match
+    total and nobody can carry more. Verified on 2026-27 GW4 Sunderland-Arsenal:
+    every Arsenal player with 90 minutes reads 1.64, the two half-time substitutions
+    read 1.51 and 0.13.
+
+    Deliberately built from UNFILTERED gw_data — MIN_MINUTES is a rule about whether
+    a player's own performance is worth averaging, and it has nothing to say about
+    how many chances his club gave up. Filtering here would be the original bug in a
+    new place: a club whose defenders rotate would end up with fewer matches on
+    record than a club whose defenders play every minute.
+    """
+    df = gw_data.copy()
+    df["expected_goals_conceded"] = pd.to_numeric(
+        df["expected_goals_conceded"], errors="coerce"
+    ).fillna(0.0)
+
+    fx = fixtures.copy()
+    fx["kickoff_time"] = pd.to_datetime(fx["kickoff_time"])
+    fixture_cols = [c for c in ["id", "team_h", "team_a", "kickoff_time"] if c in fx.columns]
+    if "id" not in fixture_cols:
+        raise ValueError("Fixtures must have 'id' column for merge")
+
+    merged = df.drop(columns=["kickoff_time"], errors="ignore").merge(
+        fx[fixture_cols], left_on="fixture", right_on="id", how="inner"
+    )
+    merged["player_team_id"] = np.where(
+        merged["was_home"].astype(bool), merged["team_h"], merged["team_a"]
+    )
+
+    team_matches = merged.groupby(
+        ["player_team_id", "fixture"], as_index=False
+    ).agg(
+        raw_xgc=("expected_goals_conceded", "max"),
+        kickoff_time=("kickoff_time", "first"),
+        opponent_team=("opponent_team", "first"),
+        was_home=("was_home", "first"),
+    )
+    team_matches["is_home"] = team_matches["was_home"].astype(int)
+    logger.debug(
+        "Built team xGC for %d club-matches across %d clubs",
+        len(team_matches),
+        team_matches["player_team_id"].nunique(),
+    )
+    return team_matches
+
+
+def _team_xgc_averages(
+    team_matches: pd.DataFrame,
+    multipliers: pd.DataFrame,
+    team_tiers: pd.DataFrame,
+    last_n_games: int = TEAM_XGC_LAST_N,
+) -> pd.DataFrame:
+    """
+    Average normalised xGC per (club, position) over the club's last N matches.
+
+    Keyed on position as well as club only because the xGC multiplier table is
+    estimated per position. Those four columns describe the same team event and
+    differ by sampling noise, but normalising with one position's multiplier and
+    then de-normalising the target fixture with another's would bake that noise in
+    as a bias, so each position is normalised with its own, exactly as before. Every
+    player at the club gets his position's club number whether or not he featured.
+    """
+    xgc_mult = multipliers[multipliers["component_type"] == "expected_goals_conceded"]
+    if len(xgc_mult) == 0:
+        logger.warning("No expected_goals_conceded multipliers; team xGC unavailable")
+        return pd.DataFrame(
+            columns=["player_team_id", "position", "avg_norm_team_xgc", "team_xgc_games"]
+        )
+
+    tiers = team_tiers[["team_id", "team_tier"]].copy()
+    tiers["team_tier"] = pd.to_numeric(tiers["team_tier"], errors="coerce")
+    tm = team_matches.merge(
+        tiers.rename(columns={"team_id": "player_team_id", "team_tier": "player_team_tier"}),
+        on="player_team_id",
+        how="left",
+    ).merge(
+        tiers.rename(columns={"team_id": "opponent_team", "team_tier": "opponent_team_tier"}),
+        on="opponent_team",
+        how="left",
+    )
+    tm = tm.sort_values(["player_team_id", "kickoff_time"])
+    recent = tm.groupby("player_team_id", group_keys=False).tail(last_n_games)
+
+    merge_keys = ["player_team_tier", "opponent_team_tier", "is_home"]
+    frames = []
+    for position in sorted(xgc_mult["position"].dropna().unique()):
+        pos_mult = xgc_mult[xgc_mult["position"] == position][merge_keys + ["multiplier"]]
+        m = recent.merge(pos_mult, on=merge_keys, how="left")
+        mult = m["multiplier"]
+        m["norm_xgc"] = np.where(
+            mult.isna() | (mult == 0), m["raw_xgc"], m["raw_xgc"] / mult
+        )
+        agg = m.groupby("player_team_id", as_index=False).agg(
+            avg_norm_team_xgc=("norm_xgc", "mean"),
+            team_xgc_games=("norm_xgc", "size"),
+        )
+        agg["position"] = str(position)
+        frames.append(agg)
+
+    out = pd.concat(frames, ignore_index=True)
+    logger.info(
+        "Team xGC over last %d club matches: %d clubs, median %.3f",
+        last_n_games,
+        out["player_team_id"].nunique(),
+        float(out["avg_norm_team_xgc"].median()) if len(out) else float("nan"),
+    )
+    return out
+
+
 def _get_player_team_assignments(normalized_stats: pd.DataFrame) -> pd.DataFrame:
     """Get latest team assignment per player from normalized stats."""
     logger.debug("Determining player team assignments")
@@ -539,10 +678,24 @@ def _create_component_predictions(
     combinations: pd.DataFrame,
     player_averages: pd.DataFrame,
     multipliers: pd.DataFrame,
+    team_xgc: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Create predictions for all PREDICTION_COMPONENTS."""
+    """
+    Create predictions for all PREDICTION_COMPONENTS.
+
+    `team_xgc` supplies the club-level expected goals conceded that `conceded_goals`
+    and `clean_sheet` are built from (see TEAM_XGC_LAST_N). Omitted, both fall back
+    to the player's own on-pitch average, which is the pre-2026-09-13 behaviour.
+    """
     merge_keys = ["position", "player_team_tier", "opponent_team_tier", "is_home"]
     all_preds = []
+
+    def _with_xgc_base(frame: pd.DataFrame) -> pd.Series:
+        """Club xGC for this player's club and position, or his own as a fallback."""
+        own = frame["avg_norm_expected_goals_conceded"]
+        if team_xgc is None or len(team_xgc) == 0:
+            return own.fillna(0.0)
+        return frame["avg_norm_team_xgc"].fillna(own).fillna(0.0)
 
     # 1. minutes_played
     p = combinations.merge(
@@ -620,17 +773,26 @@ def _create_component_predictions(
         on="element",
         how="left",
     )
+    if team_xgc is not None and len(team_xgc) > 0:
+        p = p.merge(
+            team_xgc[["player_team_id", "position", "avg_norm_team_xgc"]],
+            on=["player_team_id", "position"],
+            how="left",
+        )
     p = p.merge(
         xgc_mult[merge_keys + ["multiplier"]], on=merge_keys, how="left"
     )
     mult = p["multiplier"].fillna(1.0)
-    pred_xgc = p["avg_norm_expected_goals_conceded"].fillna(0) * mult
+    pred_xgc = _with_xgc_base(p) * mult
     p["predicted_points"] = np.where(
         p["position"].isin(["GK", "DEF"]), pred_xgc * (-0.5), 0.0
     )
     p["component_type"] = "conceded_goals"
     p["hist_games"] = p["hist_games"].fillna(0)
-    p = p.drop(columns=["multiplier"], errors="ignore")
+    p = p.drop(
+        columns=["multiplier", "avg_norm_team_xgc", "avg_norm_expected_goals_conceded"],
+        errors="ignore",
+    )
     all_preds.append(p)
 
     # 6. yellow_cards (no multiplier)
@@ -653,11 +815,17 @@ def _create_component_predictions(
         on="element",
         how="left",
     )
+    if team_xgc is not None and len(team_xgc) > 0:
+        p = p.merge(
+            team_xgc[["player_team_id", "position", "avg_norm_team_xgc"]],
+            on=["player_team_id", "position"],
+            how="left",
+        )
     p = p.merge(
         xgc_mult[merge_keys + ["multiplier"]], on=merge_keys, how="left"
     )
     mult = p["multiplier"].fillna(1.0)
-    pred_xgc = p["avg_norm_expected_goals_conceded"].fillna(0) * mult
+    pred_xgc = _with_xgc_base(p) * mult
     p["predicted_xgc"] = pred_xgc
     p["clean_sheet_prob"] = np.exp(-pred_xgc)
     cs_pts = np.where(
@@ -668,7 +836,16 @@ def _create_component_predictions(
     p["predicted_points"] = cs_pts
     p["component_type"] = "clean_sheet"
     p["hist_games"] = p["hist_games"].fillna(0)
-    p = p.drop(columns=["multiplier", "predicted_xgc", "clean_sheet_prob"], errors="ignore")
+    p = p.drop(
+        columns=[
+            "multiplier",
+            "predicted_xgc",
+            "clean_sheet_prob",
+            "avg_norm_team_xgc",
+            "avg_norm_expected_goals_conceded",
+        ],
+        errors="ignore",
+    )
     all_preds.append(p)
 
     # 8. defensive_contribution
@@ -818,8 +995,11 @@ def generate_predictions(
         player_assignments, fixtures, team_tiers, last_played_gw
     )
 
+    team_matches = _team_match_xgc(gw_data, fixtures)
+    team_xgc = _team_xgc_averages(team_matches, multipliers, team_tiers)
+
     predictions = _create_component_predictions(
-        combinations, player_averages, multipliers
+        combinations, player_averages, multipliers, team_xgc=team_xgc
     )
     predictions = _add_team_names(predictions, team_tiers)
 

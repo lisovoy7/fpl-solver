@@ -134,9 +134,10 @@ For each (player, fixture) combination, compute predicted points for 9 component
 - **FPL rule:** 1 point per 3 saves. Non-GK positions get 0.
 
 #### 5. Goals Conceded (GK/DEF only)
-- **Formula:** `predicted_points = avg_norm_xGC × fixture_multiplier × (-0.5)`
+- **Formula:** `predicted_points = avg_norm_team_xGC × fixture_multiplier × (-0.5)`
 - **Multiplier source:** `expected_goals_conceded` from `multipliers.csv`.
 - **FPL rule:** -1 point per 2 goals conceded for GK/DEF. Non-GK/DEF positions get 0.
+- **The xGC here is the CLUB's, not the player's** — see "Club-level xGC" below.
 
 #### 6. Yellow Cards
 - **Formula:** `predicted_points = avg_yellow_cards × (-1.0)`
@@ -148,7 +149,53 @@ For each (player, fixture) combination, compute predicted points for 9 component
   - MID: `predicted_points = P(CS) × 1.0`
   - FWD: `predicted_points = 0`
 - **Derivation:** Under a Poisson model, the probability of zero goals conceded is $e^{-\lambda}$ where $\lambda$ = expected goals conceded for the fixture.
-- **predicted_xGC** = `avg_norm_xGC × fixture_multiplier` (same as component 5).
+- **predicted_xGC** = `avg_norm_team_xGC × fixture_multiplier` (same as component 5).
+
+##### Club-level xGC
+
+Components 5 and 7 are the only two built from the **club's** record rather than the
+player's own, and they are deliberately outside Step 1 and Step 2 above.
+
+FPL's per-player `expected_goals_conceded` is the opposition xG generated *while that
+player was on the pitch*. For anyone who played the full 90 it is the match total; for
+everyone else it is a fraction of it. Averaging it per player therefore measured who
+stayed on the pitch, not who defends — and the `minutes >= 60` filter in Step 1 made it
+worse by deleting short appearances from the window altogether, so a substituted
+player's bad afternoon simply disappeared.
+
+Measured on 2026-27 GW4 (Sunderland 0-2 Arsenal), where Arsenal rode their luck to a
+clean sheet worth 1.64 xGC: every Arsenal player who finished read 1.64, Rice and
+Tzolis (80 minutes) read 1.20, Ben White (45) read 0.13 — and because White's 45
+minutes were filtered out entirely, his GW5 clean-sheet component came to 2.78 against
+Gabriel's 2.02. Two centre-backs, same club, same fixture, 27% apart on a number that
+describes neither of them individually.
+
+So `_team_match_xgc()` reduces each fixture to one figure per club — the **max** across
+that club's players, which is exact rather than approximate, since a 90-minute player
+carries the whole match by construction and nobody can carry more — and
+`_team_xgc_averages()` averages the club's last `TEAM_XGC_LAST_N` (6) matches. Every
+player at that club inherits it whether he played 90, 80, 45, 0, or wasn't in the
+squad. Both components are per-appearance estimates — what a player is worth *if* he
+plays — so "was he on the pitch last month" has no business in them; whether he plays
+at all is a separate question answered by the eligibility filter.
+
+Two details:
+
+- It is built from **unfiltered** gameweek data. `MIN_MINUTES` is a rule about whether a
+  player's own performance is worth averaging and has nothing to say about how many
+  chances his club gave up. Filtering here would reintroduce the bug: a club whose
+  defenders rotate would end up with fewer matches on record than one whose don't.
+- It is keyed on (club, **position**) only because `multipliers.csv` estimates the xGC
+  multiplier per position. Those four columns describe the same team event and differ by
+  sampling noise, but normalising with one position's multiplier and de-normalising the
+  target fixture with another's would bake that noise in as a bias.
+
+Effect at 2026-27 GW5, measured old vs new over 280 players: 68 unchanged, 56 moved by
+more than 0.5. The shape is the point — defenders with a full 4-game window barely moved
+(mean -0.07, sd 0.17), while those with one or two moved by ten times as much (sd ~1.0),
+because a thin personal window was exactly the case the club record replaces. Within
+Arsenal, all five defenders converged on 2.020, Gabriel's number — the one man who had
+not missed a minute, which is the correct anchor.
 
 #### 8. Defensive Contribution (BPS-based)
 - **Formula:** Uses a **normal distribution probability model**.
