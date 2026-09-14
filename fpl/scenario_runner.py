@@ -98,9 +98,15 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         return None
     solver.load_player_data(ctx["gw_data"], ctx["predictions"], player_subset=ctx["watchlist"])
     solver.set_initial_squad(ctx["current_squad"], available_transfers=ctx["free_transfers"])
+    # A scenario may override the wildcard's availability. That is how the "same plan
+    # without the wildcard" twin is built (see _wildcard_worth in api_server.py): the
+    # comparison has to hide the chip from the model, not merely avoid playing it, or
+    # the solver just plays it again. Everything else about the twin is identical, so
+    # the difference between the two objectives is the wildcard's whole contribution.
+    halves = scenario.get("wildcard_halves")
     solver.set_chip_state(
-        wildcard_first_half=ctx["wildcard_first_half"],
-        wildcard_second_half=ctx["wildcard_second_half"],
+        wildcard_first_half=halves[0] if halves else ctx["wildcard_first_half"],
+        wildcard_second_half=halves[1] if halves else ctx["wildcard_second_half"],
     )
     return solver
 

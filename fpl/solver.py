@@ -35,13 +35,16 @@ MAX_FREE_TRANSFERS = 5
 # every points total that reaches a user is charged at this, never at the planning
 # figure below.
 FPL_TRANSFER_COST = -4.0
-# What the *model* is charged when it decides to make one. Deliberately stiffer than
-# the real -4: at the true price the optimizer buys tiny predicted edges with hits,
-# and those edges are inside the noise of a per-appearance prediction. Measured on
-# the 5 teams of league 237688 whose plan paid for a transfer, moving -4 to -6 cut
-# the gameweek's hits from -44 to -16 across them while costing 0.3-1.6 points each
-# over 16 gameweeks, scored back at the real price. Override for experiments.
-TRANSFER_PENALTY_POINTS = float(os.environ.get("FPL_TRANSFER_PENALTY", -6))
+# What the *model* is charged when it decides to make one. Far above the real -4 on
+# purpose: at the true price the optimizer buys tiny predicted edges with hits, and
+# those edges are inside the noise of a per-appearance prediction. -6 was the first
+# step (league 237688: the gameweek's hits fell from -44 to -16 across the five teams
+# that took any, costing 0.3-1.6 points each over 16 gameweeks); -100 is the product
+# decision that followed - a hit is never worth taking, so no plan ever proposes one.
+# Note this only ever applied to *paid* transfers. A free transfer still costs the
+# model nothing after the first gameweek, so the one-move-a-week churn is untouched
+# by this number and needs its own fix. Override for experiments.
+TRANSFER_PENALTY_POINTS = float(os.environ.get("FPL_TRANSFER_PENALTY", -100))
 FREE_HIT_TRANSFER_PENALTY = -1000
 CHIP_WINDOWS = {'first_half': (1, 19), 'second_half': (20, 38)}
 

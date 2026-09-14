@@ -38,6 +38,7 @@ from fpl import api, config as cfg, proxy_predict
 from fpl.predict import generate_predictions
 from fpl.solver import FPLSolver, FPL_TRANSFER_COST, TRANSFER_PENALTY_POINTS
 from fpl.free_hit import (
+    CHIP_WINDOWS,
     generate_chip_scenarios, calculate_free_hit_benefits_for_horizon,
     triple_captain_candidate_gws, find_best_triple_captain_gw,
     bench_boost_candidate_gws, find_best_bench_boost_gw,
@@ -150,6 +151,90 @@ def _eligibility_config() -> dict:
     _ELIGIBILITY_CACHE["value"] = resolved
     _ELIGIBILITY_CACHE["fetched_at"] = time.time()
     logger.info("Eligibility config: %s", resolved)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Solver policy — shared with fpl-lad
+# ---------------------------------------------------------------------------
+
+# `wildcard_rate` is the points-per-remaining-gameweek a wildcard must be worth
+# before a plan is allowed to spend it; `display_gameweeks` is how much of the plan
+# fpl-lad shows and is read on that side. Both live in app_config.solver_policy for
+# the same reason player_eligibility does: they are product dials the owner changes
+# without a deploy, and two copies of a number are two numbers.
+SOLVER_POLICY_DEFAULTS = {"display_gameweeks": 5, "wildcard_rate": 2.5}
+_POLICY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
+POLICY_MAX_AGE_SECONDS = 300
+
+# Gameweeks left before a wildcard expires at which it is played no matter what it
+# scores. A chip that dies unused is worth strictly less than a mediocre one, and at
+# the deadline there is no "wait for a better week" left to trade against — so the
+# bar stops applying rather than merely reaching zero, which a tied comparison could
+# still fail. 1 = only the expiry gameweek itself.
+WILDCARD_FORCE_WITHIN_GWS = 1
+
+
+def wildcard_bar(current_gw: int, wildcard_gw: int, rate: float) -> dict:
+    """
+    The bar a wildcard played in `wildcard_gw` has to clear, and whether it is exempt.
+
+    The countdown runs to the CHIP's own deadline — GW19 for a first-half wildcard,
+    GW38 for a second-half one — never to the end of the planning horizon. Those
+    coincide while the horizon is pinned at GW19 and will come apart the moment it
+    rolls; scaling the bar off the horizon would then demand a whole season's worth
+    of value from a chip with three gameweeks left to earn it.
+
+    `forced` marks the stretch where the bar stops applying altogether. A chip that
+    expires unused is worth strictly less than a mediocre one, and at the deadline
+    there is no "wait for a better week" left to weigh against — so this is an exemption
+    rather than a bar of zero, which a tie could still fail.
+    """
+    first_half = wildcard_gw <= CHIP_WINDOWS["first_half"][1]
+    deadline = CHIP_WINDOWS["first_half" if first_half else "second_half"][1]
+    gameweeks_left = max(1, deadline - current_gw + 1)
+    return {
+        "first_half": first_half,
+        "deadline_gw": deadline,
+        "gameweeks_left": gameweeks_left,
+        "bar": rate * gameweeks_left,
+        "forced": gameweeks_left <= WILDCARD_FORCE_WITHIN_GWS,
+    }
+
+
+def _solver_policy() -> dict:
+    """
+    Product dials from app_config.solver_policy, defaults on anything unexpected.
+
+    Same contract as _eligibility_config: never the reason a solve fails, cached
+    briefly because it is read once per solve and changes about never.
+    """
+    age = time.time() - _POLICY_CACHE["fetched_at"]
+    if _POLICY_CACHE["value"] is not None and age < POLICY_MAX_AGE_SECONDS:
+        return _POLICY_CACHE["value"]
+
+    resolved = dict(SOLVER_POLICY_DEFAULTS)
+    if _supabase is not None:
+        try:
+            resp = (
+                _supabase.table("app_config")
+                .select("value")
+                .eq("key", "solver_policy")
+                .maybe_single()
+                .execute()
+            )
+            value = (getattr(resp, "data", None) or {}).get("value") or {}
+            if isinstance(value, dict):
+                for key, default in SOLVER_POLICY_DEFAULTS.items():
+                    if key in value and value[key] is not None:
+                        resolved[key] = type(default)(value[key])
+        except Exception:
+            logger.exception("Could not read app_config.solver_policy — using defaults")
+            resolved = dict(SOLVER_POLICY_DEFAULTS)
+
+    _POLICY_CACHE["value"] = resolved
+    _POLICY_CACHE["fetched_at"] = time.time()
+    logger.info("Solver policy: %s", resolved)
     return resolved
 
 
@@ -1370,6 +1455,106 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     if not best_result:
         raise ValueError("No feasible solution found")
 
+    # ── Is the wildcard worth spending this week? ──────────────────────────────
+    # A wildcard is free and the model has perfect foresight, so playing it in the
+    # first gameweek of the horizon is weakly dominant: any squad reachable by
+    # wildcarding later is reachable by wildcarding now and holding. Left alone the
+    # optimizer therefore recommends it to essentially everyone, every week —
+    # measured on league 237688, 12 of the 12 managers who still held one.
+    #
+    # So it has to clear a bar to be offered: the plan with the wildcard must beat
+    # the same plan without it by `wildcard_rate` points for every gameweek the chip
+    # has left before it expires. The countdown is to the CHIP's deadline (GW19 /
+    # GW38), never to the end of the horizon — those coincide today and will not once
+    # the horizon rolls, and scaling the bar off the horizon would demand a whole
+    # season's worth of value from a chip with three gameweeks to earn it.
+    #
+    # Only the expiring half is hidden in the twin. Hiding both would credit this
+    # wildcard with the rebuilding the *next* one would have done anyway, and the gap
+    # would clear any bar for the wrong reason.
+    wildcard_hold = None
+    wc_gws = [
+        current_gw + t - 1
+        for t, tr in best_result["solution"]["transfers"].items()
+        if tr.get("wildcard_active")
+    ]
+    rate = _solver_policy()["wildcard_rate"]
+    holds_expiring_wildcard = (
+        wildcard_first_half == 0 if current_gw <= CHIP_WINDOWS["first_half"][1]
+        else wildcard_second_half == 0
+    )
+    terms = wildcard_bar(current_gw, wc_gws[0] if wc_gws else current_gw, rate)
+
+    if terms["forced"] and holds_expiring_wildcard and not wc_gws:
+        # Last chance, and the plan does not use it. The chip is free, so playing it can
+        # only help — but "free" is exactly why the solver may be indifferent: with the
+        # gain at or near zero a tie leaves the binary at 0 and the chip quietly expires.
+        # Pin it rather than trust the tie to break the right way.
+        pinned = dict(best_result["scenario"])
+        pinned["name"] = f"{best_result['scenario_name']} | wildcard GW{current_gw}"
+        pinned["force_wildcard_gw"] = current_gw
+        on_progress("wildcard_check", 0, 1)
+        pinned_raw = next(iter(solve_scenarios([pinned], solver_ctx)), None)
+        if pinned_raw and pinned_raw["status"] == "solved":
+            pinned_fh = sum(
+                fh_benefits.get(g, {}).get("total_points", 0) for g in pinned["free_hit_gws"]
+            )
+            best_result = {
+                "scenario_name": pinned["name"], "free_hit_gws": pinned["free_hit_gws"],
+                "bench_boost_gw": pinned["bench_boost_gw"], "solution": pinned_raw["solution"],
+                "squad_points": pinned_raw["squad_points"], "scenario": pinned,
+                "total_points": pinned_raw["base_points"] + pinned_fh,
+            }
+            best_total = best_result["total_points"]
+            logger.info("Wildcard pinned to GW%d — its last gameweek, and unused otherwise", current_gw)
+        else:
+            logger.warning("Could not pin the expiring wildcard to GW%d", current_gw)
+
+    elif wc_gws and terms["forced"]:
+        logger.info(
+            "Wildcard kept unconditionally: GW%d is its last chance (deadline GW%d)",
+            wc_gws[0], terms["deadline_gw"],
+        )
+
+    elif wc_gws:
+        twin = dict(best_result["scenario"])
+        twin["name"] = f"{best_result['scenario_name']} | no wildcard"
+        twin["wildcard_halves"] = (
+            (1, wildcard_second_half) if terms["first_half"] else (wildcard_first_half, 1)
+        )
+        on_progress("wildcard_check", 0, 1)
+        twin_raw = next(iter(solve_scenarios([twin], solver_ctx)), None)
+
+        if not twin_raw or twin_raw["status"] != "solved":
+            # Never suppress on a failed measurement — an unsolved twin is no evidence
+            # that the wildcard was not worth playing.
+            logger.warning("Wildcard twin did not solve; keeping the wildcard")
+        else:
+            twin_total = twin_raw["base_points"] + sum(
+                fh_benefits.get(g, {}).get("total_points", 0) for g in twin["free_hit_gws"]
+            )
+            worth = best_total - twin_total
+            logger.info(
+                "Wildcard on GW%d is worth %.1f pts over %d gameweeks to its GW%d deadline "
+                "(%.2f/GW); bar is %.1f at rate %.2f",
+                wc_gws[0], worth, terms["gameweeks_left"], terms["deadline_gw"],
+                worth / terms["gameweeks_left"], terms["bar"], rate,
+            )
+            if worth < terms["bar"]:
+                best_result = {
+                    "scenario_name": twin["name"], "free_hit_gws": twin["free_hit_gws"],
+                    "bench_boost_gw": twin["bench_boost_gw"], "solution": twin_raw["solution"],
+                    "squad_points": twin_raw["squad_points"], "scenario": twin,
+                    "total_points": twin_total,
+                }
+                best_total = twin_total
+                wildcard_hold = {
+                    "worth_points": round(worth, 1),
+                    "bar_points": round(terms["bar"], 1),
+                    "rate_per_gameweek": rate,
+                    "gameweeks_to_deadline": terms["gameweeks_left"],
+                }
+
     on_progress("finalising")
 
     # Workers return plain data, not solver objects; rebuild the winner's solver
@@ -1383,6 +1568,11 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     )
     result["elapsed_seconds"] = round(time.time() - start_time, 1)
     result["scenarios_evaluated"] = len(chip_scenarios)
+    # Present only when a wildcard the manager still holds was deliberately not spent,
+    # so the frontend can say the optimizer weighed it and chose to wait rather than
+    # leaving a held chip looking overlooked.
+    if wildcard_hold is not None:
+        result["wildcard_held_back"] = wildcard_hold
     return result
 
 
