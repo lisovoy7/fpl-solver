@@ -155,6 +155,81 @@ def _eligibility_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Standing per-player prediction adjustments
+# ---------------------------------------------------------------------------
+
+# app_config.points_multiplier holds the league-wide manual corrections — the owner's
+# standing view that the model is wrong about specific players:
+#
+#     {"enabled": true, "players": {"432": 0.9, "388": 1.2}}
+#
+# Keys are FPL element ids as strings (JSON object keys always are), values the factor.
+# It lives in Supabase rather than in config.yaml because config.yaml is baked into the
+# container image: changing a number there means a rebuild and a deploy of two services,
+# where this is one row per environment, edited in the dashboard, live on the next run.
+# `enabled: false` switches the whole list off without losing it.
+#
+# These are applied wherever predictions are PRODUCED, never where they are read back —
+# see _apply_points_multipliers's callers. The nightly cron bakes them into
+# player_predictions, so the table, the solver and Alfie's own SQL all quote the same
+# adjusted number; re-applying them on the read path would square every one.
+_MULTIPLIER_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
+MULTIPLIER_MAX_AGE_SECONDS = 300
+
+
+def _global_points_multipliers() -> List["PointsMultiplierEntry"]:
+    """
+    The standing per-player multipliers from app_config.points_multiplier.
+
+    Empty on anything unexpected — a missing row, a malformed one, an unreadable
+    Supabase. Same contract as _eligibility_config: this must never be the reason a
+    prediction run or a solve fails, and "no adjustments" is the safe direction to fail
+    in, since it is what the model itself says.
+    """
+    age = time.time() - _MULTIPLIER_CACHE["fetched_at"]
+    if _MULTIPLIER_CACHE["value"] is not None and age < MULTIPLIER_MAX_AGE_SECONDS:
+        return _MULTIPLIER_CACHE["value"]
+
+    resolved: List[PointsMultiplierEntry] = []
+    if _supabase is not None:
+        try:
+            resp = (
+                _supabase.table("app_config")
+                .select("value")
+                .eq("key", "points_multiplier")
+                .maybe_single()
+                .execute()
+            )
+            value = (getattr(resp, "data", None) or {}).get("value") or {}
+            if isinstance(value, dict) and value.get("enabled", True):
+                for pid, mult in (value.get("players") or {}).items():
+                    try:
+                        resolved.append(
+                            PointsMultiplierEntry(player=int(pid), multiplier=float(mult))
+                        )
+                    except (TypeError, ValueError) as exc:
+                        # One bad entry must not take the other eleven with it, and it
+                        # must not be silent either — a typo'd id here is a correction
+                        # the owner believes is live and isn't.
+                        logger.warning(
+                            "app_config.points_multiplier: skipping %r -> %r (%s)",
+                            pid, mult, exc,
+                        )
+        except Exception:
+            logger.exception("Could not read app_config.points_multiplier — no adjustments applied")
+            resolved = []
+
+    _MULTIPLIER_CACHE["value"] = resolved
+    _MULTIPLIER_CACHE["fetched_at"] = time.time()
+    if resolved:
+        logger.info(
+            "Standing points multipliers: %s",
+            {e.player: e.multiplier for e in resolved},
+        )
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Solver policy — shared with fpl-lad
 # ---------------------------------------------------------------------------
 
@@ -260,6 +335,20 @@ class ForcedLineupEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class PointsMultiplierEntry(BaseModel):
+    """Scale one player's predicted points, every gameweek, by a constant.
+
+    The manual override for "the model is wrong about this player" — above 1.0 to boost,
+    below to fade. Mirrors the `points_multiplier` shape in config.yaml, which the CLI
+    has always read; this is the same knob reachable over HTTP.
+
+    0 is allowed and means "worth nothing", but `non_playing` is the better way to say
+    that: it is per-gameweek and it is what the rest of the pipeline reports on.
+    """
+    player: int
+    multiplier: float = Field(ge=0, le=5)
+
+
 class SellingPriceEntry(BaseModel):
     """What one player the manager already owns would actually raise if sold.
 
@@ -303,6 +392,11 @@ class OptimizeRequest(BaseModel):
     non_playing: list[NonPlayingEntry] = Field(default_factory=list)
     # Force into the candidate pool even if they fail the min_hist_pct filter.
     extra_players: list[int] = Field(default_factory=list)
+    # Scale specific players' predicted points across every gameweek. Applied BEFORE the
+    # candidate pool is built, so a boost can genuinely lift a player through the
+    # price-bucket cut — see _apply_points_multipliers for why that ordering is the
+    # whole point of the field.
+    points_multiplier: list[PointsMultiplierEntry] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=90)
     max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
@@ -470,6 +564,62 @@ def _predictions_from_supabase(
     except Exception:
         logger.exception("player_predictions read failed — regenerating in-process")
         return None, None
+
+
+def _apply_points_multipliers(
+    predictions: pd.DataFrame, entries: List[PointsMultiplierEntry]
+) -> pd.DataFrame:
+    """
+    Scale the named players' predicted points, and hand back a new frame.
+
+    Applied to `predictions` BEFORE create_watchlist runs, and that ordering is the
+    feature rather than an implementation detail. The CLI has always applied this deep
+    inside the solver (FPLSolver._apply_points_multiplier_override), where the candidate
+    pool is already fixed — so a boost could only ever re-rank players who had already
+    got in. With the price-bucket filter on (bucket_top_n, which fpl-lad always sends) a
+    pool slot is exactly what a boosted player is missing: the cut keeps the top 5 per
+    position/price bucket by predicted points, so a player one place below the line was
+    unreachable no matter how large a multiplier you gave him.
+
+    Applying it here means every points-based decision downstream sees the same numbers:
+    the bucket cut, the MILP objective, the chip scoring, and the expected points the
+    plan reports back. Which is also the caveat — a boosted plan's projected total is
+    boosted too, so it is not comparable with an unboosted one.
+
+    What it deliberately does NOT do is get a player past the *start* filter
+    (min_hist_pct). That test counts appearances, not points, so no multiplier can move
+    it; someone who is not a regular starter still needs `extra_players`.
+
+    The frame is copied rather than mutated in place. Both sources build a fresh one per
+    request today, so this is belt and braces — but a cached predictions frame would
+    otherwise accumulate multipliers across requests, and the symptom (one manager's
+    manual boost quietly applying to everybody) is about as bad as silent bugs get.
+    """
+    if not entries:
+        return predictions
+
+    out = predictions.copy()
+    known = set(out["element"].unique().tolist())
+    for entry in entries:
+        if entry.player not in known:
+            # Not fatal: the caller named a player who has no predictions at all
+            # (unknown id, or someone the prediction run skipped). Scaling nothing is
+            # the honest outcome, but it must be visible or it looks like the knob
+            # is broken.
+            logger.warning(
+                "points_multiplier: player %d has no predictions — multiplier %.2f ignored",
+                entry.player, entry.multiplier,
+            )
+            continue
+        mask = out["element"] == entry.player
+        before = float(out.loc[mask, "predicted_points"].sum())
+        out.loc[mask, "predicted_points"] *= entry.multiplier
+        logger.info(
+            "points_multiplier: player %d scaled %.2fx over %d rows, total %.1f -> %.1f",
+            entry.player, entry.multiplier, int(mask.sum()),
+            before, float(out.loc[mask, "predicted_points"].sum()),
+        )
+    return out
 
 
 def _non_free_hit_squad_gw(last_gw: int, free_hit_gws: List[int], first_gw: int = 1) -> int:
@@ -1071,15 +1221,30 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # fallback is generated from this very frame.
     predictions_through_gw: Optional[int] = None
 
+    # The standing adjustments apply wherever predictions are PRODUCED, and nowhere else.
+    # player_predictions already holds them — the nightly cron bakes them in before it
+    # writes — so the table path must not re-apply them or every factor is squared. The
+    # two paths that generate numbers on the spot (pre-season proxy, and the in-process
+    # fallback when the table is missing or stale) have to, or a solve served from either
+    # would quietly ignore corrections the same solve served from the table respects.
     if use_proxy:
         gw_data = proxy_predict.synthesize_gw_data(bootstrap)
         predictions = proxy_predict.load_proxy_predictions(DATA_DIR)
+        predictions = _apply_points_multipliers(predictions, _global_points_multipliers())
     else:
         gw_data = _get_gw_data(bootstrap)
         predictions, predictions_through_gw = _predictions_from_supabase(bootstrap, gw_data)
         if predictions is None:
             predictions = generate_predictions(gw_data, fixtures, multipliers, current_season_tiers, season)
             predictions_through_gw = None
+            predictions = _apply_points_multipliers(predictions, _global_points_multipliers())
+
+    # Then this run's own overrides, on top. Applied before anything reads the numbers —
+    # the candidate pool included. See _apply_points_multipliers; the ordering is the
+    # reason this is not left to the solver's own points_multiplier_override. A player
+    # named both here and in app_config ends up with both factors, which is the honest
+    # reading of "the standing correction, plus what the user just asked for".
+    predictions = _apply_points_multipliers(predictions, req.points_multiplier)
 
     # Every owned player must exist in the pool or the model is infeasible rather
     # than merely suboptimal — see ensure_players_present. Applied after
@@ -1239,6 +1404,9 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "horizon": horizon,
         "budget": total_budget,
         "start_gw": current_gw,
+        # Already baked into `predictions` above by _apply_points_multipliers, which runs
+        # early enough to also shape the candidate pool. Letting the solver apply the same
+        # list again would square every multiplier.
         "points_multiplier": None,
         "forced_lineup": forced_lineup_tuples,
         "non_playing": non_playing_tuples,
@@ -1681,6 +1849,15 @@ async def generate_predictions_cron(secret: str = Query(...)):
     if len(predictions) == 0:
         return {"ok": True, "rows_written": 0, "note": "generate_predictions returned no rows"}
 
+    # The standing manual corrections are baked in HERE, before the rows are written, so
+    # player_predictions is the single adjusted number everything downstream quotes — the
+    # solver, Alfie's SQL, the player_eligibility view. Applying them solver-side instead
+    # would have left Alfie answering "Guéhi is predicted 2.5" about a plan built on 3.0.
+    # The cost, accepted deliberately: the table no longer holds raw model output, and a
+    # change to app_config.points_multiplier only lands on the next run of this cron.
+    standing = _global_points_multipliers()
+    predictions = _apply_points_multipliers(predictions, standing)
+
     # Sum the 9 scoring components down to one predicted_points total per
     # player per gameweek — simplest shape for both Alfie's SQL and the solver
     # (which already sums per (element, event) itself when it loads predictions).
@@ -1745,5 +1922,10 @@ async def generate_predictions_cron(secret: str = Query(...)):
         "ok": True,
         "rows_written": written,
         "stale_rows_deleted": stale_deleted,
+        # Reported, not just logged: these numbers are the owner's manual corrections
+        # baked into the table, and "did my multiplier actually land?" has no other
+        # answer from outside. A sudden 0 here means app_config was emptied, renamed or
+        # unreadable — same class of silent failure as fpl-sync's unavailableFlagged.
+        "multipliers_applied": {e.player: e.multiplier for e in standing},
         "elapsed_seconds": elapsed,
     }
