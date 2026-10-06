@@ -78,6 +78,7 @@ class FPLSolver:
         selling_discounts: Optional[Dict[int, int]] = None,
         player_clubs: Optional[Dict[int, int]] = None,
         club_gameweeks: Optional[Dict[int, set]] = None,
+        no_transfer_gws: Optional[List[int]] = None,
     ):
         """
         Initialize the FPL solver.
@@ -111,6 +112,11 @@ class FPLSolver:
             club_gameweeks: {club_id: set of gameweeks that club has a fixture in}.
                 Together these two are how a blank gameweek is detected — see
                 _add_bgw_constraints. Omit both and it falls back to the old test.
+            no_transfer_gws: Actual gameweeks in which the plan makes no regular
+                transfer, so the free transfer rolls over — "roll in GW7 and GW9".
+                A wildcard played in such a gameweek is still allowed (its moves
+                are not transfers in the FPL sense), and a Free Hit week is already
+                frozen. See _add_no_transfer_constraints.
         """
         self.T = planning_horizon
         self.budget = budget
@@ -130,6 +136,7 @@ class FPLSolver:
         self.selling_discounts = selling_discounts or {}
         self.player_clubs = player_clubs or {}
         self.club_gameweeks = club_gameweeks
+        self.no_transfer_gws = list(no_transfer_gws or [])
         self._club_cache = None
 
         self.players = None
@@ -1220,6 +1227,36 @@ class FPLSolver:
 
         logger.debug("Chip constraints added")
 
+    def _add_no_transfer_constraints(self) -> None:
+        """Forbid regular transfers in the gameweeks the manager wants to roll.
+
+        One constraint per gameweek, `u[t] <= 15 * wildcard[t]`: with the wildcard
+        off, the transfer count is pinned at zero and add_transfer_banking_constraints
+        banks the free transfer forward on its own (A[t+1] <= A[t] + 1, capped at
+        MAX_FREE_TRANSFERS); with the wildcard on, the bound is slack and the
+        rebuild goes ahead — a wildcard's moves are not transfers in the FPL sense,
+        and "don't transfer this week" has never meant "don't wildcard this week".
+        Free Hit weeks already have s == r == 0 from add_squad_flow_constraints, so
+        the bound is redundant there rather than contradictory.
+
+        Adds no variables, deliberately: extra binaries at horizon 19 are what push
+        CBC past the feasibility-pump cliff (see extract_solution's ledger note).
+
+        Gameweeks outside the horizon are skipped, same as force_wildcard_gw.
+        """
+        if not self.no_transfer_gws:
+            return
+
+        for actual_gw in sorted(set(self.no_transfer_gws)):
+            t = actual_gw - self.start_gw + 1
+            if not 1 <= t <= self.T:
+                continue
+            self.prob += (
+                self.variables['u'][t] <= TOTAL_SQUAD_SIZE * self.variables['wildcard'][t],
+                f"No_Transfer_GW{actual_gw}",
+            )
+            logger.debug("  No regular transfers in GW %d (transfer rolls)", actual_gw)
+
     def build_model(self) -> None:
         """Build the complete MILP model."""
         logger.debug("Building complete MILP model")
@@ -1234,6 +1271,7 @@ class FPLSolver:
         self.add_lineup_constraints()
         self.add_chip_constraints()
         self.add_advanced_constraints()
+        self._add_no_transfer_constraints()
 
         logger.debug("MILP model built: %d vars, %d constraints",
                      len(self.prob.variables()), len(self.prob.constraints))

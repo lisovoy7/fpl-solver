@@ -397,6 +397,11 @@ class OptimizeRequest(BaseModel):
     # price-bucket cut — see _apply_points_multipliers for why that ordering is the
     # whole point of the field.
     points_multiplier: list[PointsMultiplierEntry] = Field(default_factory=list)
+    # Gameweeks in which the plan makes no regular transfer, so the free transfer rolls
+    # over — "roll my transfer in GW7 and GW9". A wildcard in such a gameweek is still
+    # allowed (its moves are not transfers), and a Free Hit week is already frozen.
+    # Gameweeks outside the solved horizon are ignored; the caller validates them.
+    no_transfer_gws: list[int] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=90)
     max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
@@ -1411,6 +1416,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "forced_lineup": forced_lineup_tuples,
         "non_playing": non_playing_tuples,
         "banned_players": banned_owned,
+        "no_transfer_gws": list(req.no_transfer_gws),
         "first_gw_penalty": -1,
         "sub_probability": 0.10,
         "predictions": predictions,

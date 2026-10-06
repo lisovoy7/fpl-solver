@@ -647,6 +647,7 @@ def main() -> None:
         "forced_lineup": overrides.get("forced_lineup"),
         "non_playing": overrides.get("non_playing"),
         "banned_players": banned_owned,
+        "no_transfer_gws": overrides.get("no_transfer_gws"),
         "first_gw_penalty": first_gw_penalty,
         "sub_probability": sub_probability,
         "predictions": predictions,

@@ -92,6 +92,10 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         selling_discounts=ctx.get("selling_discounts"),
         player_clubs=ctx.get("player_clubs"),
         club_gameweeks=ctx.get("club_gameweeks"),
+        # In ctx rather than the scenario on purpose: every scenario, the BB/TC
+        # re-solves AND the no-wildcard twin below must all honour it, or the twin
+        # would be allowed moves the real plan was not and the comparison would lie.
+        no_transfer_gws=ctx.get("no_transfer_gws"),
     )
     solver.load_predictions(ctx["predictions"])
     if len(solver.predictions) == 0:
