@@ -49,6 +49,7 @@ def create_watchlist(
     min_hist_pct: float = 0.6,
     max_hist_window: int = 6,
     min_minutes: int = 45,
+    absent_streak_games: int = 2,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,
     max_gw: Optional[int] = None,
@@ -70,6 +71,9 @@ def create_watchlist(
             reproduces this same filter for Alfie's answers from a shared config row
             (app_config.player_eligibility), and the two must not be able to disagree
             about what an appearance is.
+        absent_streak_games: A player whose club's last this-many played fixtures ALL
+            went under `min_minutes` for him is dropped, however many starts he banked
+            earlier in the window. 0 turns it off. Same shared config row as above.
         must_include: Player IDs to always include (e.g. current squad).
         must_exclude: Player IDs to always exclude.
         max_gw: Last gameweek the eligibility window may see. Defaults to whatever
@@ -169,6 +173,32 @@ def create_watchlist(
         required_by_element = (
             (opportunities * min_hist_pct).apply(math.ceil).astype(int)
         )
+
+        # The share-of-window test above can't see WHEN the starts were. Measured at GW7,
+        # 2026-10-19: Awoniyi, Brobbey, Fofana and Rashford each had exactly the 4 starts
+        # required from 6 — all of them in GW2-5 — and 0 minutes in both of their last two
+        # matches, with no injury flag to catch them either. Each sat in the top 5 of his
+        # price bucket. So a player whose club's last `absent_streak_games` played fixtures
+        # all went under `min_minutes` for him is out, whatever the window says.
+        #
+        # Fixtures, not gameweeks — his own rows ARE his club's fixtures (see above), so a
+        # blank gameweek can't count against him and a DGW counts both legs. Fewer rows than
+        # the streak (a new signing, GW1) means there isn't a streak to judge, so he stays.
+        absent_streak: set = set()
+        if absent_streak_games > 0:
+            # GW first so an undated row can't sort itself to the end and pose as the latest.
+            order = [gw_col] + (["kickoff_time"] if "kickoff_time" in played.columns else [])
+            last_n = played.sort_values(order).groupby("element").tail(absent_streak_games)
+            streak = last_n.groupby("element")["minutes"].agg(
+                n="size", best=lambda m: m.fillna(0).max()
+            )
+            absent_streak = set(
+                streak[(streak["n"] >= absent_streak_games) & (streak["best"] < min_minutes)].index
+            )
+            logger.info(
+                "%d players under %d min in each of their club's last %d played fixtures",
+                len(absent_streak), min_minutes, absent_streak_games,
+            )
         # Kept only for the log line and for callers that still read it: the league-wide
         # requirement a club playing every gameweek in the window would face.
         min_hist_games = math.ceil(window_size * min_hist_pct)
@@ -189,6 +219,7 @@ def create_watchlist(
         logger.warning("No GW column in gw_data — falling back to all-time hist_games")
         recent_counts = None
         required_by_element = None
+        absent_streak = set()
         min_hist_games = 0
 
     # 2. Total expected points per player
@@ -262,6 +293,7 @@ def create_watchlist(
     if required_by_element is not None:
         required = remaining["element"].map(required_by_element).fillna(0).astype(int)
         filtered = remaining[remaining["recent_hist_games"] >= required]
+        filtered = filtered[~filtered["element"].isin(absent_streak)]
     else:
         filtered = remaining[remaining["recent_hist_games"] >= min_hist_games]
 

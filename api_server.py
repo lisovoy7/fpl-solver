@@ -106,7 +106,9 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 # The values this filter used before it became configurable. Also what fpl-lad's
 # player_eligibility view falls back to, so a missing row degrades identically on
 # both sides rather than making them disagree.
-ELIGIBILITY_DEFAULTS = {"min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 45}
+ELIGIBILITY_DEFAULTS = {
+    "min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 45, "absent_streak_games": 2,
+}
 _ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 ELIGIBILITY_MAX_AGE_SECONDS = 300
 
@@ -1299,6 +1301,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         min_hist_pct=min_hist_pct,
         max_hist_window=eligibility["max_hist_window"],
         min_minutes=eligibility["min_minutes"],
+        # The proxy path has no real minutes to judge a streak by, same as min_hist_pct.
+        absent_streak_games=0 if use_proxy else eligibility["absent_streak_games"],
         must_include=must_include, must_exclude=pool_exclude,
         max_gw=predictions_through_gw,
     )
