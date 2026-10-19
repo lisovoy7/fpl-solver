@@ -1,0 +1,15 @@
+# What `gcloud run deploy --source .` leaves out of the upload.
+#
+# Without this file gcloud only honours .gitignore, so anything untracked but not ignored
+# went up with every deploy — on 2026-10-19 that was 5.6 MB of .claude/ worktrees, each a
+# full older copy of this repo. A deploy should ship the committed code and nothing else.
+#!include:.gitignore
+
+.git/
+.gcloudignore
+.claude/
+.venv*/
+.pytest_cache/
+supabase/
+tests/
+data/gw1_expected_starters.yaml
