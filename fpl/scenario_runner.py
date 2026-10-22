@@ -32,6 +32,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from typing import Callable, Dict, List, Optional
 
+import pulp
+
 from fpl.solver import FPLSolver
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
     Returns None when the scenario has no predictions in range.
     """
     solver = FPLSolver(
+        solver_name=ctx.get("solver_name", "CBC"),
         planning_horizon=ctx["horizon"],
         budget=ctx["budget"],
         start_gw=ctx["start_gw"],
@@ -130,7 +133,17 @@ def _solve_scenario(scenario: Dict, ctx: Dict) -> Dict:
 
     solver.build_model()
     if not solver.solve(time_limit=ctx["time_limit"], mip_gap=ctx.get("mip_gap")):
-        return {"scenario": scenario, "status": "infeasible"}
+        # HiGHS returning nothing is not proof the scenario is infeasible — it may just
+        # have found no incumbent inside the limit. CBC is the engine this model was
+        # tuned on for months, so give it one go rather than drop the scenario. A
+        # proven infeasibility (-1) would fail identically under CBC, so it is skipped.
+        if solver.solver_name.upper() != "HIGHS" or solver.prob.status == pulp.LpStatusInfeasible:
+            return {"scenario": scenario, "status": "infeasible"}
+        logger.warning("HiGHS found no solution for %s (status %s); retrying with CBC",
+                       scenario.get("name"), pulp.LpStatus[solver.prob.status])
+        solver.solver_name = "CBC"
+        if not solver.solve(time_limit=ctx["time_limit"]):
+            return {"scenario": scenario, "status": "infeasible"}
 
     solution = solver.extract_solution()
     return {

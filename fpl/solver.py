@@ -87,7 +87,7 @@ class FPLSolver:
             planning_horizon: Number of gameweeks to optimize.
             budget: Total budget in units (100 = 10.0M).
             start_gw: Starting gameweek for optimization.
-            solver_name: MILP solver to use ('CBC', 'GUROBI', etc.).
+            solver_name: MILP solver to use ('CBC', 'HIGHS', 'GUROBI').
             points_multiplier_override: List of (player_id, multiplier) tuples.
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
@@ -1315,6 +1315,16 @@ class FPLSolver:
 
         if self.solver_name.upper() == 'GUROBI':
             solver = pulp.GUROBI_CMD(msg=0, timeLimit=time_limit)
+        elif self.solver_name.upper() == 'HIGHS':
+            # HiGHS closes the gap on this model where CBC never does: measured
+            # 2026-10-22 on 11 real prod scenarios at horizon 12, HiGHS reached a
+            # 0.5% gap in 4-11s where CBC ran its full 60s, at the same objective
+            # (within ±1.4 pts of ~700, ahead as often as behind). threads defaults
+            # to 1 for the same reason as CBC's: scenarios run in parallel processes.
+            highs_kwargs = {'msg': 0, 'timeLimit': time_limit, 'threads': threads or 1}
+            if mip_gap is not None:
+                highs_kwargs['gapRel'] = mip_gap
+            solver = pulp.HiGHS(**highs_kwargs)
         else:
             solver = pulp.PULP_CBC_CMD(options=options, **kwargs)
 

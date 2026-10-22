@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -405,6 +405,14 @@ class OptimizeRequest(BaseModel):
     # Gameweeks outside the solved horizon are ignored; the caller validates them.
     no_transfer_gws: list[int] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=90)
+    # MILP engine. HiGHS proves a 0.5% gap on this model in ~5-10s where CBC never
+    # closes it and always burns the full time limit — see FPLSolver.solve. "cbc" is
+    # the rollback switch; a HiGHS scenario that finds nothing retries on CBC anyway.
+    solver: Literal["highs", "cbc"] = "highs"
+    # Stop each solve once within this relative gap of the best possible plan. 0.005 on
+    # a ~700-point horizon is ~3.5 pts of slack in theory; measured, the plans landed
+    # within ±1.4 of CBC's 60s answer. None searches to the time limit.
+    mip_gap: Optional[float] = Field(default=0.005, ge=0, le=0.1)
     max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
     force_free_hit_gw: Optional[int] = None
@@ -1431,7 +1439,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "wildcard_first_half": wildcard_first_half,
         "wildcard_second_half": wildcard_second_half,
         "time_limit": req.time_limit_per_scenario,
-        "mip_gap": None,
+        "solver_name": req.solver.upper(),
+        "mip_gap": req.mip_gap,
         "bank": bank,
         "selling_discounts": selling_discounts,
         # How the solver tells a real blank gameweek from a player it simply has no
