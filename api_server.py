@@ -513,13 +513,21 @@ def _predictions_from_supabase(
     if _supabase is None:
         return None, None
     try:
-        rows: list[dict] = api.fetch_pages(
-            lambda a, b: _supabase.table("player_predictions")
-            .select("player_id,event,predicted_points,generated_at,through_gw")
-            .range(a, b)
-            .execute()
-            .data
-        )
+        rows: list[dict] = []
+        page = 1000
+        offset = 0
+        while True:
+            resp = (
+                _supabase.table("player_predictions")
+                .select("player_id,event,predicted_points,generated_at,through_gw")
+                .range(offset, offset + page - 1)
+                .execute()
+            )
+            batch = resp.data or []
+            rows.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
         if not rows:
             logger.info("player_predictions table is empty — regenerating in-process")
             return None, None

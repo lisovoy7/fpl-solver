@@ -10,9 +10,8 @@ import json
 import logging
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -229,34 +228,18 @@ def fetch_gameweek_data(bootstrap_data: Optional[Dict] = None) -> pd.DataFrame:
     return pd.DataFrame(all_rows)
 
 
-def fetch_pages(fetch_page: Callable[[int, int], List[Dict]], page_size: int = 1000, parallel: int = 6) -> List[Dict]:
-    """
-    Read every page of a PostgREST table, `parallel` pages at a time.
-
-    PostgREST caps a response at ~1000 rows, and the database sits in Tokyo while the
-    solver runs in Belgium, so each page is a ~0.3s round trip. One page after another
-    that was 3-4s of every solve for player_predictions alone. `fetch_page(start, end)`
-    returns the rows for that inclusive range; reading stops at the first short page.
-    """
-    rows: List[Dict] = []
-    start = 0
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        while True:
-            starts = [start + i * page_size for i in range(parallel)]
-            batches = list(pool.map(lambda s: fetch_page(s, s + page_size - 1) or [], starts))
-            for batch in batches:
-                rows.extend(batch)
-                if len(batch) < page_size:
-                    return rows
-            start = starts[-1] + page_size
-
-
 def _fetch_all_rows(supabase_client: Any, table: str, columns: str = "*", page_size: int = 1000) -> List[Dict]:
     """Paginate through a Supabase table — PostgREST caps a single response at ~1000 rows."""
-    return fetch_pages(
-        lambda a, b: supabase_client.table(table).select(columns).range(a, b).execute().data,
-        page_size,
-    )
+    rows: List[Dict] = []
+    start = 0
+    while True:
+        resp = supabase_client.table(table).select(columns).range(start, start + page_size - 1).execute()
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    return rows
 
 
 def fetch_gameweek_data_from_supabase(
