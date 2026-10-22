@@ -413,6 +413,15 @@ class OptimizeRequest(BaseModel):
     # a ~700-point horizon is ~3.5 pts of slack in theory; measured, the plans landed
     # within ±1.4 of CBC's 60s answer. None searches to the time limit.
     mip_gap: Optional[float] = Field(default=0.005, ge=0, le=0.1)
+    # Each of the next two removes a whole sequential round of solving, which on Cloud
+    # Run is what a run's wall-clock is made of. Defaults keep the original pipeline.
+    # How many top (FH, BB, TC) placements get a full BB/TC-aware re-solve. 0 takes the
+    # best post-hoc placement as it stands: exact for Triple Captain, approximate for
+    # Bench Boost (the bench is the one picked without knowing BB was coming).
+    chip_resolve_top_k: int = Field(default=CHIP_RESELECT_TOP_K, ge=0, le=10)
+    # Solve every scenario's no-wildcard twin in the first round rather than the
+    # winner's twin after everything else. Doubles the first round's solves.
+    wildcard_twin_upfront: bool = False
     max_scenarios: int = Field(default=50, ge=1, le=500)
     force_wildcard_gw: Optional[int] = None
     force_free_hit_gw: Optional[int] = None
@@ -504,21 +513,13 @@ def _predictions_from_supabase(
     if _supabase is None:
         return None, None
     try:
-        rows: list[dict] = []
-        page = 1000
-        offset = 0
-        while True:
-            resp = (
-                _supabase.table("player_predictions")
-                .select("player_id,event,predicted_points,generated_at,through_gw")
-                .range(offset, offset + page - 1)
-                .execute()
-            )
-            batch = resp.data or []
-            rows.extend(batch)
-            if len(batch) < page:
-                break
-            offset += page
+        rows: list[dict] = api.fetch_pages(
+            lambda a, b: _supabase.table("player_predictions")
+            .select("player_id,event,predicted_points,generated_at,through_gw")
+            .range(a, b)
+            .execute()
+            .data
+        )
         if not rows:
             logger.info("player_predictions table is empty — regenerating in-process")
             return None, None
@@ -1453,32 +1454,65 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # Announced before the first solve returns, not after: everything above this point
     # (bootstrap, predictions, watchlist, free-hit benefits) is a silent minute or so,
     # and the phase change is what tells the user it ended.
-    on_progress("scenarios", 0, len(chip_scenarios))
-    raw_results = solve_scenarios(
-        chip_scenarios, solver_ctx,
+    # The wildcard check below needs the winning plan re-solved with the wildcard
+    # hidden — a whole extra round of solving after everything else. With
+    # wildcard_twin_upfront that twin is solved for every scenario in this same round
+    # instead, so the check costs no extra wall-clock. Only the current half's chip is
+    # hidden, which is the one the check hides whenever the plan plays it this half; a
+    # plan whose wildcard lands in the next half still falls back to the solve below.
+    rate = _solver_policy()["wildcard_rate"]
+    current_first_half = current_gw <= CHIP_WINDOWS["first_half"][1]
+    holds_expiring_wildcard = (
+        wildcard_first_half == 0 if current_first_half else wildcard_second_half == 0
+    )
+    upfront_twins: List[dict] = []
+    if (
+        req.wildcard_twin_upfront
+        and holds_expiring_wildcard
+        and req.force_wildcard_gw is None
+        and not wildcard_bar(current_gw, current_gw, rate)["forced"]
+    ):
+        hidden = (1, wildcard_second_half) if current_first_half else (wildcard_first_half, 1)
+        upfront_twins = [
+            {**s, "name": f"{s['name']} | no wildcard", "wildcard_halves": hidden}
+            for s in chip_scenarios
+        ]
+
+    on_progress("scenarios", 0, len(chip_scenarios) + len(upfront_twins))
+    raw_all = solve_scenarios(
+        chip_scenarios + upfront_twins, solver_ctx,
         on_progress=lambda done, total: on_progress("scenarios", done, total),
     )
+    raw_results = raw_all[:len(chip_scenarios)]
 
-    for raw in raw_results:
-        if raw["status"] != "solved":
-            continue
+    def _as_result(raw: dict) -> dict:
         scenario = raw["scenario"]
         fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
-        total_points = raw["base_points"] + fh_total
-
         # The built PuLP model (every decision variable + constraint) used to stay
         # resident here once per scenario and OOM'd long runs — see 0437e12, which
         # fixed that by dropping .prob after extract_solution(). That patch is
         # unnecessary now: solving happens in worker processes that return plain
         # data and then exit, so no MILP model ever reaches this process.
-        result = {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
-                  "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
-                  "squad_points": raw["squad_points"], "scenario": scenario,
-                  "total_points": total_points}
+        return {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
+                "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
+                "squad_points": raw["squad_points"], "scenario": scenario,
+                "total_points": raw["base_points"] + fh_total}
+
+    # Keyed by Free Hit placement: that is the only thing distinguishing the first
+    # round's scenarios, and it survives the BB/TC re-solve renaming the winner.
+    twin_results = {
+        tuple(raw["scenario"]["free_hit_gws"]): _as_result(raw)
+        for raw in raw_all[len(chip_scenarios):] if raw["status"] == "solved"
+    }
+
+    for raw in raw_results:
+        if raw["status"] != "solved":
+            continue
+        result = _as_result(raw)
         scenario_results.append(result)
 
-        if total_points > best_total:
-            best_total = total_points
+        if result["total_points"] > best_total:
+            best_total = result["total_points"]
             best_result = result
 
     # ── EXPERIMENTAL shadow evaluation of Free Hit pruning — logging only. ──
@@ -1536,62 +1570,92 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # BB is picked first and excluded from TC's candidates, not jointly optimized
     # with it: cheap to score either way, but scoring every (BB gw, TC gw) pair
     # together buys little given both get a full re-solve below anyway.
-    if (defer_bench_boost or defer_triple_captain) and scenario_results:
-        bb_gws = bench_boost_candidate_gws(
-            start_gw=current_gw, planning_horizon=horizon,
-            used_first_half=bench_boost_used_first_half,
-            used_second_half=bench_boost_used_second_half,
-        ) if defer_bench_boost else []
-        tc_gws = triple_captain_candidate_gws(
-            start_gw=current_gw, planning_horizon=horizon,
-            used_first_half=triple_captain_used_first_half,
-            used_second_half=triple_captain_used_second_half,
-        ) if defer_triple_captain else []
+    bb_gws = bench_boost_candidate_gws(
+        start_gw=current_gw, planning_horizon=horizon,
+        used_first_half=bench_boost_used_first_half,
+        used_second_half=bench_boost_used_second_half,
+    ) if defer_bench_boost else []
+    tc_gws = triple_captain_candidate_gws(
+        start_gw=current_gw, planning_horizon=horizon,
+        used_first_half=triple_captain_used_first_half,
+        used_second_half=triple_captain_used_second_half,
+    ) if defer_triple_captain else []
 
+    def _place_bb_tc(result: dict) -> Tuple[Optional[int], Optional[int], float]:
+        """Best post-hoc (BB gw, TC gw) for an already-solved plan, and what they add."""
+        wildcard_gws = [
+            current_gw + t - 1
+            for t, tr in result["solution"]["transfers"].items()
+            if tr.get("wildcard_active")
+        ]
+
+        if defer_bench_boost:
+            bb_gw, bb_bonus = find_best_bench_boost_gw(
+                lineups_by_t=result["solution"]["lineups"],
+                expected_points=result["squad_points"],
+                wildcard_gws=wildcard_gws,
+                start_gw=current_gw, horizon=horizon,
+                free_hit_gws=result["free_hit_gws"],
+                triple_captain_gw=-1,
+                candidate_gws=bb_gws,
+                sub_probability=0.10,
+            )
+        else:
+            # Already baked into this scenario's own full solve (forced, or
+            # not available to defer in the first place) — nothing to add.
+            bb_gw = result["bench_boost_gw"] if result["bench_boost_gw"] != -1 else None
+            bb_bonus = 0.0
+
+        if defer_triple_captain:
+            tc_gw, tc_bonus = find_best_triple_captain_gw(
+                captains_by_t=result["solution"]["captains"],
+                expected_points=result["squad_points"],
+                wildcard_gws=wildcard_gws,
+                start_gw=current_gw, horizon=horizon,
+                free_hit_gws=result["free_hit_gws"],
+                bench_boost_gw=bb_gw if bb_gw is not None else -1,
+                candidate_gws=tc_gws,
+                sub_probability=0.10,
+            )
+        else:
+            tc_gw = result["scenario"]["triple_captain_gw"]
+            tc_gw = tc_gw if tc_gw != -1 else None
+            tc_bonus = 0.0
+
+        return bb_gw, tc_gw, (bb_bonus or 0.0) + (tc_bonus or 0.0)
+
+    def _with_placed_chips(result: dict, bb_gw: Optional[int], tc_gw: Optional[int], bonus: float) -> dict:
+        """
+        The plan as solved, with post-hoc BB/TC written onto it instead of re-solved.
+
+        Triple Captain is exact this way (same captain, one more multiple). Bench
+        Boost is the approximation the re-solve exists to correct: a BB-aware solve
+        might pick a different bench. chip_resolve_top_k=0 trades that for a round.
+        """
+        chips = {t: list(c) for t, c in result["solution"]["chips"].items()}
+        for gw, chip in ((bb_gw, "bench_boost"), (tc_gw, "triple_captain")):
+            if gw is not None and gw != result["scenario"].get(f"{chip}_gw"):
+                chips[gw - current_gw + 1].append(chip)
+        parts = [f"BB GW{bb_gw}"] if bb_gw is not None else []
+        parts += [f"TC GW{tc_gw}"] if tc_gw is not None else []
+        name = " | ".join([result["scenario_name"], *parts])
+        scenario = {
+            **result["scenario"], "name": name,
+            "bench_boost_gw": bb_gw if bb_gw is not None else -1,
+            "triple_captain_gw": tc_gw if tc_gw is not None else -1,
+        }
+        return {**result, "scenario_name": name, "scenario": scenario,
+                "bench_boost_gw": scenario["bench_boost_gw"],
+                "solution": {**result["solution"], "chips": chips},
+                "total_points": result["total_points"] + bonus}
+
+    if (defer_bench_boost or defer_triple_captain) and scenario_results:
         ranked = []
         for result in scenario_results:
-            wildcard_gws = [
-                current_gw + t - 1
-                for t, tr in result["solution"]["transfers"].items()
-                if tr.get("wildcard_active")
-            ]
-
-            if defer_bench_boost:
-                bb_gw, bb_bonus = find_best_bench_boost_gw(
-                    lineups_by_t=result["solution"]["lineups"],
-                    expected_points=result["squad_points"],
-                    wildcard_gws=wildcard_gws,
-                    start_gw=current_gw, horizon=horizon,
-                    free_hit_gws=result["free_hit_gws"],
-                    triple_captain_gw=-1,
-                    candidate_gws=bb_gws,
-                    sub_probability=0.10,
-                )
-            else:
-                # Already baked into this scenario's own full solve (forced, or
-                # not available to defer in the first place) — nothing to add.
-                bb_gw = result["bench_boost_gw"] if result["bench_boost_gw"] != -1 else None
-                bb_bonus = 0.0
-
-            if defer_triple_captain:
-                tc_gw, tc_bonus = find_best_triple_captain_gw(
-                    captains_by_t=result["solution"]["captains"],
-                    expected_points=result["squad_points"],
-                    wildcard_gws=wildcard_gws,
-                    start_gw=current_gw, horizon=horizon,
-                    free_hit_gws=result["free_hit_gws"],
-                    bench_boost_gw=bb_gw if bb_gw is not None else -1,
-                    candidate_gws=tc_gws,
-                    sub_probability=0.10,
-                )
-            else:
-                tc_gw = result["scenario"]["triple_captain_gw"]
-                tc_gw = tc_gw if tc_gw != -1 else None
-                tc_bonus = 0.0
-
+            bb_gw, tc_gw, bonus = _place_bb_tc(result)
             if bb_gw is None and tc_gw is None:
                 continue
-            ranked.append((result, bb_gw, tc_gw, bb_bonus + tc_bonus))
+            ranked.append((result, bb_gw, tc_gw, bonus))
 
         # Dedup identical (FH, BB, TC) allocations — different FH-only scenarios
         # can independently land on the same BB/TC placement, and re-solving the
@@ -1608,8 +1672,14 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
 
         deduped.sort(key=lambda item: item[0]["total_points"] + item[3], reverse=True)
 
+        if req.chip_resolve_top_k == 0 and deduped:
+            placed = _with_placed_chips(*deduped[0])
+            if placed["total_points"] > best_total:
+                best_total = placed["total_points"]
+                best_result = placed
+
         final_scenarios = []
-        for result, bb_gw, tc_gw, _ in deduped[:CHIP_RESELECT_TOP_K]:
+        for result, bb_gw, tc_gw, _ in deduped[:req.chip_resolve_top_k]:
             chip_parts = [f"BB GW{bb_gw}"] if bb_gw is not None else []
             chip_parts += [f"TC GW{tc_gw}"] if tc_gw is not None else []
             name = " | ".join([result["scenario_name"], *chip_parts]) if chip_parts else result["scenario_name"]
@@ -1621,7 +1691,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 "force_wildcard_gw": req.force_wildcard_gw,
             })
 
-        on_progress("chip_resolve", 0, len(final_scenarios))
+        if final_scenarios:
+            on_progress("chip_resolve", 0, len(final_scenarios))
         for raw in solve_scenarios(
             final_scenarios, solver_ctx,
             on_progress=lambda done, total: on_progress("chip_resolve", done, total),
@@ -1665,11 +1736,6 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         for t, tr in best_result["solution"]["transfers"].items()
         if tr.get("wildcard_active")
     ]
-    rate = _solver_policy()["wildcard_rate"]
-    holds_expiring_wildcard = (
-        wildcard_first_half == 0 if current_gw <= CHIP_WINDOWS["first_half"][1]
-        else wildcard_second_half == 0
-    )
     terms = wildcard_bar(current_gw, wc_gws[0] if wc_gws else current_gw, rate)
 
     if terms["forced"] and holds_expiring_wildcard and not wc_gws:
@@ -1704,22 +1770,35 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         )
 
     elif wc_gws:
-        twin = dict(best_result["scenario"])
-        twin["name"] = f"{best_result['scenario_name']} | no wildcard"
-        twin["wildcard_halves"] = (
-            (1, wildcard_second_half) if terms["first_half"] else (wildcard_first_half, 1)
-        )
-        on_progress("wildcard_check", 0, 1)
-        twin_raw = next(iter(solve_scenarios([twin], solver_ctx)), None)
+        twin_result = None
+        upfront = twin_results.get(tuple(best_result["free_hit_gws"]))
+        if upfront is not None and terms["first_half"] == current_first_half:
+            # Solved alongside the first round (wildcard_twin_upfront). It was solved
+            # without BB/TC, so it gets the same post-hoc placement the winner got —
+            # comparing a chip-boosted plan against an unboosted twin would credit the
+            # wildcard with the Bench Boost's points.
+            twin_result = upfront
+            if defer_bench_boost or defer_triple_captain:
+                bb_gw, tc_gw, bonus = _place_bb_tc(upfront)
+                if bb_gw is not None or tc_gw is not None:
+                    twin_result = _with_placed_chips(upfront, bb_gw, tc_gw, bonus)
+        else:
+            twin = dict(best_result["scenario"])
+            twin["name"] = f"{best_result['scenario_name']} | no wildcard"
+            twin["wildcard_halves"] = (
+                (1, wildcard_second_half) if terms["first_half"] else (wildcard_first_half, 1)
+            )
+            on_progress("wildcard_check", 0, 1)
+            twin_raw = next(iter(solve_scenarios([twin], solver_ctx)), None)
+            if twin_raw and twin_raw["status"] == "solved":
+                twin_result = _as_result(twin_raw)
 
-        if not twin_raw or twin_raw["status"] != "solved":
+        if twin_result is None:
             # Never suppress on a failed measurement — an unsolved twin is no evidence
             # that the wildcard was not worth playing.
             logger.warning("Wildcard twin did not solve; keeping the wildcard")
         else:
-            twin_total = twin_raw["base_points"] + sum(
-                fh_benefits.get(g, {}).get("total_points", 0) for g in twin["free_hit_gws"]
-            )
+            twin_total = twin_result["total_points"]
             worth = best_total - twin_total
             logger.info(
                 "Wildcard on GW%d is worth %.1f pts over %d gameweeks to its GW%d deadline "
@@ -1728,12 +1807,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 worth / terms["gameweeks_left"], terms["bar"], rate,
             )
             if worth < terms["bar"]:
-                best_result = {
-                    "scenario_name": twin["name"], "free_hit_gws": twin["free_hit_gws"],
-                    "bench_boost_gw": twin["bench_boost_gw"], "solution": twin_raw["solution"],
-                    "squad_points": twin_raw["squad_points"], "scenario": twin,
-                    "total_points": twin_total,
-                }
+                best_result = twin_result
                 best_total = twin_total
                 wildcard_hold = {
                     "worth_points": round(worth, 1),

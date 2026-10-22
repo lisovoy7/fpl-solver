@@ -24,6 +24,18 @@ import pulp
 
 logger = logging.getLogger(__name__)
 
+
+# Solvers return integer variables to within a tolerance, not exactly. CBC happens to
+# round them to 0/1 before PuLP sees them; HiGHS hands back 0.9999999, which an
+# `== 1` test reads as "not in the squad" and an int() truncates to one transfer too
+# few. Every read of an integer variable goes through these two.
+def _on(var) -> bool:
+    return var.varValue is not None and var.varValue > 0.5
+
+
+def _count(var) -> int:
+    return int(round(var.varValue or 0))
+
 # FPL Rules Constants
 SQUAD_COMPOSITION = {'GK': 2, 'DEF': 5, 'MID': 5, 'FWD': 3}
 LINEUP_CONSTRAINTS = {'GK': (1, 1), 'DEF': (3, 5), 'MID': (2, 5), 'FWD': (1, 3)}
@@ -1374,17 +1386,17 @@ class FPLSolver:
         gameweeks = list(range(1, self.T + 1))
 
         for t in gameweeks:
-            squad = [p for p in players if self.variables['x'][(p, t)].varValue == 1]
+            squad = [p for p in players if _on(self.variables['x'][(p, t)])]
             solution['squads'][t] = squad
 
         for t in gameweeks:
-            starters = [p for p in players if self.variables['y'][(p, t)].varValue == 1]
-            squad = [p for p in players if self.variables['x'][(p, t)].varValue == 1]
+            starters = [p for p in players if _on(self.variables['y'][(p, t)])]
+            squad = [p for p in players if _on(self.variables['x'][(p, t)])]
             bench = [p for p in squad if p not in starters]
             solution['lineups'][t] = {'starters': starters, 'bench': bench}
 
         for t in gameweeks:
-            captain = [p for p in players if self.variables['c'][(p, t)].varValue == 1]
+            captain = [p for p in players if _on(self.variables['c'][(p, t)])]
             if captain:
                 solution['captains'][t] = captain[0]
 
@@ -1409,8 +1421,8 @@ class FPLSolver:
         available = self.initial_transfers
         for t in gameweeks:
             honest_available[t] = available
-            used = int(self.variables['u'][t].varValue)
-            if self.variables['wildcard'][t].varValue == 1 or (self.start_gw + t - 1) in self.free_hit_gws:
+            used = _count(self.variables['u'][t])
+            if _on(self.variables['wildcard'][t]) or (self.start_gw + t - 1) in self.free_hit_gws:
                 # Both chips make the gameweek's transfers free and leave the balance
                 # untouched, matching Transfer_Banking_Wildcard_* / FreeHit_Transfer_Preserve.
                 honest_paid[t] = 0
@@ -1419,11 +1431,11 @@ class FPLSolver:
             available = min(MAX_FREE_TRANSFERS, available - min(used, available) + 1)
 
         for t in gameweeks:
-            transfers_in = [p for p in players if self.variables['s'][(p, t)].varValue == 1]
-            transfers_out = [p for p in players if self.variables['r'][(p, t)].varValue == 1]
-            transfers_used = int(self.variables['u'][t].varValue)
+            transfers_in = [p for p in players if _on(self.variables['s'][(p, t)])]
+            transfers_out = [p for p in players if _on(self.variables['r'][(p, t)])]
+            transfers_used = _count(self.variables['u'][t])
             free_transfers_available = honest_available[t]
-            wildcard_active = self.variables['wildcard'][t].varValue == 1
+            wildcard_active = _on(self.variables['wildcard'][t])
             paid_transfers = honest_paid[t]
             free_transfers = transfers_used - paid_transfers
 
@@ -1447,7 +1459,7 @@ class FPLSolver:
 
         for t in gameweeks:
             chips_used = []
-            if self.variables['wildcard'][t].varValue == 1:
+            if _on(self.variables['wildcard'][t]):
                 chips_used.append('wildcard')
             actual_gw = self.start_gw + t - 1
             if actual_gw == self.bench_boost_gw:

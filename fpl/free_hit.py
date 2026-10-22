@@ -487,9 +487,9 @@ def _solve_free_hit_milp(
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
     if prob.status == pulp.LpStatusOptimal:
-        squad = [p for p in players if x[p].varValue == 1]
-        lineup = [p for p in players if y[p].varValue == 1]
-        captain = next(p for p in players if c[p].varValue == 1)
+        squad = [p for p in players if x[p].varValue > 0.5]
+        lineup = [p for p in players if y[p].varValue > 0.5]
+        captain = next(p for p in players if c[p].varValue > 0.5)
         total_points = pulp.value(prob.objective)
         squad_cost = sum(costs[p] for p in squad)
 
