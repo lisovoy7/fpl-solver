@@ -48,7 +48,7 @@ def create_watchlist(
     gw_data: pd.DataFrame,
     min_hist_pct: float = 0.6,
     max_hist_window: int = 6,
-    min_minutes: int = 45,
+    min_minutes: int = 55,
     absent_streak_games: int = 2,
     must_include: Optional[List[int]] = None,
     must_exclude: Optional[List[int]] = None,

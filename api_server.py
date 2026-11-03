@@ -107,7 +107,7 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 # player_eligibility view falls back to, so a missing row degrades identically on
 # both sides rather than making them disagree.
 ELIGIBILITY_DEFAULTS = {
-    "min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 45, "absent_streak_games": 2,
+    "min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 55, "absent_streak_games": 2,
 }
 _ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 ELIGIBILITY_MAX_AGE_SECONDS = 300
@@ -1439,7 +1439,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "banned_players": banned_owned,
         "no_transfer_gws": list(req.no_transfer_gws),
         "first_gw_penalty": -1,
-        "sub_probability": 0.10,
+        "sub_probability": 0.0,
         "predictions": predictions,
         "gw_data": gw_data,
         "watchlist": watchlist,
@@ -1606,7 +1606,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 free_hit_gws=result["free_hit_gws"],
                 triple_captain_gw=-1,
                 candidate_gws=bb_gws,
-                sub_probability=0.10,
+                sub_probability=0.0,
             )
         else:
             # Already baked into this scenario's own full solve (forced, or
@@ -1623,7 +1623,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 free_hit_gws=result["free_hit_gws"],
                 bench_boost_gw=bb_gw if bb_gw is not None else -1,
                 candidate_gws=tc_gws,
-                sub_probability=0.10,
+                sub_probability=0.0,
             )
         else:
             tc_gw = result["scenario"]["triple_captain_gw"]

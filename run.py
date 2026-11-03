@@ -628,7 +628,7 @@ def main() -> None:
         )
 
     # 7. Solve each scenario
-    sub_probability = solver_params.get("sub_probability", 0.10)
+    sub_probability = solver_params.get("sub_probability", 0.0)
     first_gw_penalty = solver_params.get("first_gw_transfer_penalty", -1)
     time_limit = solver_params.get("time_limit_per_scenario", 15)
     if args.time_limit is not None:

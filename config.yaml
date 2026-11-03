@@ -66,7 +66,7 @@ solver:
 
   # Probability that each starting-XI player won't play (rotation/injury).
   # 0.10 means ~1.1 expected subs per GW. Set to 0.0 to ignore bench value.
-  sub_probability: 0.10
+  sub_probability: 0.0
 
   # Artificial penalty per transfer in GW1 of the planning horizon.
   # Discourages the solver from front-loading transfers.  -1 = mild penalty.
