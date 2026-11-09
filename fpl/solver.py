@@ -190,6 +190,7 @@ class FPLSolver:
         self.predictions = predictions.groupby(['element', 'event']).agg(agg_dict).reset_index()
 
         self._apply_points_multiplier_override()
+        self._apply_non_playing_points_override()
         self._apply_free_hit_points_override()
 
         logger.debug("Loaded predictions for %d players", self.predictions['element'].nunique())
@@ -219,6 +220,34 @@ class FPLSolver:
                 )
             else:
                 logger.warning("  Player %d: No predictions found", player_id)
+
+    def _apply_non_playing_points_override(self) -> None:
+        """Override predicted points to 0 for non-playing players in their listed GWs.
+
+        Applied to `self.predictions` (and again to `self.expected_points` in
+        `create_objective`) rather than only inside the MILP objective loop, because
+        downstream consumers read both: `_squad_points` feeds `self.expected_points`
+        into the post-hoc Bench Boost / Triple Captain placement (`find_best_bench_boost_gw`,
+        `find_best_triple_captain_gw`), and `_format_solution` reads `self.predictions`
+        on a rebuilt solver that never calls `create_objective`. Zeroing only the MILP
+        variable weight left injured bench players with their healthy projections in
+        `squad_points`, causing post-hoc Bench Boost to pick the exact gameweek two
+        starters were benched for injury (prod job f11b2d81, GW11).
+        """
+        if not self.non_playing_players:
+            return
+
+        logger.debug("Applying non-playing points override (set to 0)")
+
+        for player_id, gw_list in self.non_playing_players:
+            if not gw_list:
+                continue
+            mask = (
+                (self.predictions['element'] == player_id)
+                & (self.predictions['event'].isin(gw_list))
+            )
+            if mask.any():
+                self.predictions.loc[mask, 'predicted_points'] = 0.0
 
     def _apply_free_hit_points_override(self) -> None:
         """Override all player points to 0 for Free Hit gameweeks."""
@@ -449,6 +478,11 @@ class FPLSolver:
                 self.expected_points[key] += row['predicted_points']
             else:
                 self.expected_points[key] = row['predicted_points']
+
+        for player_id, gw_list in self.non_playing_players:
+            for gw in gw_list:
+                if (player_id, gw) in self.expected_points:
+                    self.expected_points[(player_id, gw)] = 0.0
 
         expected_points = self.expected_points
         objective_terms = []
