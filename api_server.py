@@ -240,7 +240,7 @@ def _global_points_multipliers() -> List["PointsMultiplierEntry"]:
 # fpl-lad shows and is read on that side. Both live in app_config.solver_policy for
 # the same reason player_eligibility does: they are product dials the owner changes
 # without a deploy, and two copies of a number are two numbers.
-SOLVER_POLICY_DEFAULTS = {"display_gameweeks": 5, "wildcard_rate": 2.5}
+SOLVER_POLICY_DEFAULTS = {"display_gameweeks": 5, "wildcard_rate": 1.5, "free_hit_rate": 0.2}
 _POLICY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 POLICY_MAX_AGE_SECONDS = 300
 
@@ -1399,17 +1399,34 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             non_playing_players=non_playing_tuples,
         )
 
-    # Prune FH placements to the top fh_top_k by precomputed benefit. A
-    # scenario's final score is base_points + fh_benefits[gw] and the second
-    # term is already exact here, so the cheap rank only has to identify the
-    # cluster of good weeks — the full solves below still pick the winner
-    # among them. Skipped when a week is forced (the caller has already
-    # decided) and for scenarios without a Free Hit (always kept).
+    policy = _solver_policy()
+    rate = policy["wildcard_rate"]
+    fh_rate = policy.get("free_hit_rate", 0.2)
+
+    def _fh_early_penalty(gw: int) -> float:
+        deadline = CHIP_WINDOWS["first_half"][1] if gw <= CHIP_WINDOWS["first_half"][1] else CHIP_WINDOWS["second_half"][1]
+        return fh_rate * max(0, deadline - gw)
+
+    # Prune FH placements to the top fh_top_k by uplift over the manager's own squad
+    # in that week (minus a small early-use penalty). Ranking by raw FH dream-team
+    # points picks the exact same two weeks for every manager in the game; ranking by
+    # uplift picks the weeks where THIS manager's squad actually has a fixture crunch.
     if req.fh_top_k is not None and fh_benefits and req.force_free_hit_gw is None:
         fh_scens = [s for s in chip_scenarios if s["free_hit_gws"]]
         if len(fh_scens) > req.fh_top_k:
+            squad_df = predictions[predictions["element"].isin(current_squad)]
+            own_gw_pts: Dict[int, float] = {}
+            for g, grp in squad_df.groupby("event"):
+                top11 = sorted(grp["predicted_points"].tolist(), reverse=True)[:11]
+                own_gw_pts[int(g)] = sum(top11) + (top11[0] if top11 else 0.0)
+
             def _fh_score(s: dict) -> float:
-                return sum(fh_benefits.get(g, {}).get("total_points", 0.0) for g in s["free_hit_gws"])
+                return sum(
+                    fh_benefits.get(g, {}).get("total_points", 0.0)
+                    - own_gw_pts.get(g, 0.0)
+                    - _fh_early_penalty(g)
+                    for g in s["free_hit_gws"]
+                )
             kept_ids = {id(s) for s in sorted(fh_scens, key=_fh_score, reverse=True)[:req.fh_top_k]}
             dropped = [s["name"] for s in fh_scens if id(s) not in kept_ids]
             chip_scenarios = [
@@ -1457,69 +1474,34 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         # which two gameweeks into a season is wrong for most of the game.
         "player_clubs": api.player_club_map(bootstrap),
         "club_gameweeks": api.club_gameweek_map(fixtures),
+        "wildcard_rate": rate,
     }
 
-    # Announced before the first solve returns, not after: everything above this point
-    # (bootstrap, predictions, watchlist, free-hit benefits) is a silent minute or so,
-    # and the phase change is what tells the user it ended.
-    # The wildcard check below needs the winning plan re-solved with the wildcard
-    # hidden — a whole extra round of solving after everything else. With
-    # wildcard_twin_upfront that twin is solved for every scenario in this same round
-    # instead, so the check costs no extra wall-clock. Only the current half's chip is
-    # hidden, which is the one the check hides whenever the plan plays it this half; a
-    # plan whose wildcard lands in the next half still falls back to the solve below.
-    rate = _solver_policy()["wildcard_rate"]
-    current_first_half = current_gw <= CHIP_WINDOWS["first_half"][1]
-    holds_expiring_wildcard = (
-        wildcard_first_half == 0 if current_first_half else wildcard_second_half == 0
-    )
-    upfront_twins: List[dict] = []
-    if (
-        req.wildcard_twin_upfront
-        and holds_expiring_wildcard
-        and req.force_wildcard_gw is None
-        and not wildcard_bar(current_gw, current_gw, rate)["forced"]
-    ):
-        hidden = (1, wildcard_second_half) if current_first_half else (wildcard_first_half, 1)
-        upfront_twins = [
-            {**s, "name": f"{s['name']} | no wildcard", "wildcard_halves": hidden}
-            for s in chip_scenarios
-        ]
-
-    on_progress("scenarios", 0, len(chip_scenarios) + len(upfront_twins))
-    raw_all = solve_scenarios(
-        chip_scenarios + upfront_twins, solver_ctx,
+    on_progress("scenarios", 0, len(chip_scenarios))
+    raw_results = solve_scenarios(
+        chip_scenarios, solver_ctx,
         on_progress=lambda done, total: on_progress("scenarios", done, total),
     )
-    raw_results = raw_all[:len(chip_scenarios)]
 
     def _as_result(raw: dict) -> dict:
         scenario = raw["scenario"]
         fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
-        # The built PuLP model (every decision variable + constraint) used to stay
-        # resident here once per scenario and OOM'd long runs — see 0437e12, which
-        # fixed that by dropping .prob after extract_solution(). That patch is
-        # unnecessary now: solving happens in worker processes that return plain
-        # data and then exit, so no MILP model ever reaches this process.
+        fh_pen = sum(_fh_early_penalty(gw) for gw in scenario["free_hit_gws"])
         return {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
                 "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
                 "squad_points": raw["squad_points"], "scenario": scenario,
-                "total_points": raw["base_points"] + fh_total}
+                "total_points": raw["base_points"] + fh_total,
+                "selection_points": raw["base_points"] + fh_total - fh_pen}
 
-    # Keyed by Free Hit placement: that is the only thing distinguishing the first
-    # round's scenarios, and it survives the BB/TC re-solve renaming the winner.
-    twin_results = {
-        tuple(raw["scenario"]["free_hit_gws"]): _as_result(raw)
-        for raw in raw_all[len(chip_scenarios):] if raw["status"] == "solved"
-    }
-
+    best_selection = -float("inf")
     for raw in raw_results:
         if raw["status"] != "solved":
             continue
         result = _as_result(raw)
         scenario_results.append(result)
 
-        if result["total_points"] > best_total:
+        if result["selection_points"] > best_selection:
+            best_selection = result["selection_points"]
             best_total = result["total_points"]
             best_result = result
 
@@ -1655,7 +1637,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         return {**result, "scenario_name": name, "scenario": scenario,
                 "bench_boost_gw": scenario["bench_boost_gw"],
                 "solution": {**result["solution"], "chips": chips},
-                "total_points": result["total_points"] + bonus}
+                "total_points": result["total_points"] + bonus,
+                "selection_points": result.get("selection_points", result["total_points"]) + bonus}
 
     if (defer_bench_boost or defer_triple_captain) and scenario_results:
         ranked = []
@@ -1678,11 +1661,12 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             seen.add(key)
             deduped.append(item)
 
-        deduped.sort(key=lambda item: item[0]["total_points"] + item[3], reverse=True)
+        deduped.sort(key=lambda item: item[0].get("selection_points", item[0]["total_points"]) + item[3], reverse=True)
 
         if req.chip_resolve_top_k == 0 and deduped:
             placed = _with_placed_chips(*deduped[0])
-            if placed["total_points"] > best_total:
+            if placed["selection_points"] > best_selection:
+                best_selection = placed["selection_points"]
                 best_total = placed["total_points"]
                 best_result = placed
 
@@ -1709,120 +1693,21 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 continue
             scenario = raw["scenario"]
             fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
+            fh_pen = sum(_fh_early_penalty(gw) for gw in scenario["free_hit_gws"])
             total_points = raw["base_points"] + fh_total
+            selection_points = total_points - fh_pen
 
-            if total_points > best_total:
+            if selection_points > best_selection:
+                best_selection = selection_points
                 best_total = total_points
                 best_result = {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
                                "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
                                "squad_points": raw["squad_points"], "scenario": scenario,
-                               "total_points": total_points}
+                               "total_points": total_points,
+                               "selection_points": selection_points}
 
     if not best_result:
         raise ValueError("No feasible solution found")
-
-    # ── Is the wildcard worth spending this week? ──────────────────────────────
-    # A wildcard is free and the model has perfect foresight, so playing it in the
-    # first gameweek of the horizon is weakly dominant: any squad reachable by
-    # wildcarding later is reachable by wildcarding now and holding. Left alone the
-    # optimizer therefore recommends it to essentially everyone, every week —
-    # measured on league 237688, 12 of the 12 managers who still held one.
-    #
-    # So it has to clear a bar to be offered: the plan with the wildcard must beat
-    # the same plan without it by `wildcard_rate` points for every gameweek the chip
-    # has left before it expires. The countdown is to the CHIP's deadline (GW19 /
-    # GW38), never to the end of the horizon — those coincide today and will not once
-    # the horizon rolls, and scaling the bar off the horizon would demand a whole
-    # season's worth of value from a chip with three gameweeks to earn it.
-    #
-    # Only the expiring half is hidden in the twin. Hiding both would credit this
-    # wildcard with the rebuilding the *next* one would have done anyway, and the gap
-    # would clear any bar for the wrong reason.
-    wildcard_hold = None
-    wc_gws = [
-        current_gw + t - 1
-        for t, tr in best_result["solution"]["transfers"].items()
-        if tr.get("wildcard_active")
-    ]
-    terms = wildcard_bar(current_gw, wc_gws[0] if wc_gws else current_gw, rate)
-
-    if terms["forced"] and holds_expiring_wildcard and not wc_gws:
-        # Last chance, and the plan does not use it. The chip is free, so playing it can
-        # only help — but "free" is exactly why the solver may be indifferent: with the
-        # gain at or near zero a tie leaves the binary at 0 and the chip quietly expires.
-        # Pin it rather than trust the tie to break the right way.
-        pinned = dict(best_result["scenario"])
-        pinned["name"] = f"{best_result['scenario_name']} | wildcard GW{current_gw}"
-        pinned["force_wildcard_gw"] = current_gw
-        on_progress("wildcard_check", 0, 1)
-        pinned_raw = next(iter(solve_scenarios([pinned], solver_ctx)), None)
-        if pinned_raw and pinned_raw["status"] == "solved":
-            pinned_fh = sum(
-                fh_benefits.get(g, {}).get("total_points", 0) for g in pinned["free_hit_gws"]
-            )
-            best_result = {
-                "scenario_name": pinned["name"], "free_hit_gws": pinned["free_hit_gws"],
-                "bench_boost_gw": pinned["bench_boost_gw"], "solution": pinned_raw["solution"],
-                "squad_points": pinned_raw["squad_points"], "scenario": pinned,
-                "total_points": pinned_raw["base_points"] + pinned_fh,
-            }
-            best_total = best_result["total_points"]
-            logger.info("Wildcard pinned to GW%d — its last gameweek, and unused otherwise", current_gw)
-        else:
-            logger.warning("Could not pin the expiring wildcard to GW%d", current_gw)
-
-    elif wc_gws and terms["forced"]:
-        logger.info(
-            "Wildcard kept unconditionally: GW%d is its last chance (deadline GW%d)",
-            wc_gws[0], terms["deadline_gw"],
-        )
-
-    elif wc_gws:
-        twin_result = None
-        upfront = twin_results.get(tuple(best_result["free_hit_gws"]))
-        if upfront is not None and terms["first_half"] == current_first_half:
-            # Solved alongside the first round (wildcard_twin_upfront). It was solved
-            # without BB/TC, so it gets the same post-hoc placement the winner got —
-            # comparing a chip-boosted plan against an unboosted twin would credit the
-            # wildcard with the Bench Boost's points.
-            twin_result = upfront
-            if defer_bench_boost or defer_triple_captain:
-                bb_gw, tc_gw, bonus = _place_bb_tc(upfront)
-                if bb_gw is not None or tc_gw is not None:
-                    twin_result = _with_placed_chips(upfront, bb_gw, tc_gw, bonus)
-        else:
-            twin = dict(best_result["scenario"])
-            twin["name"] = f"{best_result['scenario_name']} | no wildcard"
-            twin["wildcard_halves"] = (
-                (1, wildcard_second_half) if terms["first_half"] else (wildcard_first_half, 1)
-            )
-            on_progress("wildcard_check", 0, 1)
-            twin_raw = next(iter(solve_scenarios([twin], solver_ctx)), None)
-            if twin_raw and twin_raw["status"] == "solved":
-                twin_result = _as_result(twin_raw)
-
-        if twin_result is None:
-            # Never suppress on a failed measurement — an unsolved twin is no evidence
-            # that the wildcard was not worth playing.
-            logger.warning("Wildcard twin did not solve; keeping the wildcard")
-        else:
-            twin_total = twin_result["total_points"]
-            worth = best_total - twin_total
-            logger.info(
-                "Wildcard on GW%d is worth %.1f pts over %d gameweeks to its GW%d deadline "
-                "(%.2f/GW); bar is %.1f at rate %.2f",
-                wc_gws[0], worth, terms["gameweeks_left"], terms["deadline_gw"],
-                worth / terms["gameweeks_left"], terms["bar"], rate,
-            )
-            if worth < terms["bar"]:
-                best_result = twin_result
-                best_total = twin_total
-                wildcard_hold = {
-                    "worth_points": round(worth, 1),
-                    "bar_points": round(terms["bar"], 1),
-                    "rate_per_gameweek": rate,
-                    "gameweeks_to_deadline": terms["gameweeks_left"],
-                }
 
     on_progress("finalising")
 
@@ -1837,11 +1722,6 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     )
     result["elapsed_seconds"] = round(time.time() - start_time, 1)
     result["scenarios_evaluated"] = len(chip_scenarios)
-    # Present only when a wildcard the manager still holds was deliberately not spent,
-    # so the frontend can say the optimizer weighed it and chose to wait rather than
-    # leaving a held chip looking overlooked.
-    if wildcard_hold is not None:
-        result["wildcard_held_back"] = wildcard_hold
     return result
 
 

@@ -96,7 +96,11 @@ def generate_chip_scenarios(
         remaining_fh_first = max(0, 1 - free_hits_used_first_half)
         remaining_fh_second = max(0, 1 - free_hits_used_second_half)
 
-        fh_scenarios = [{"name": "No Free Hit", "free_hit_gws": []}]
+        must_use_fh = (
+            (remaining_fh_first > 0 and CHIP_WINDOWS["first_half"][1] in first_half_gws)
+            or (remaining_fh_second > 0 and CHIP_WINDOWS["second_half"][1] in second_half_gws)
+        )
+        fh_scenarios = [] if must_use_fh else [{"name": "No Free Hit", "free_hit_gws": []}]
         if remaining_fh_first > 0 and first_half_gws:
             for gw in first_half_gws:
                 fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})

@@ -91,6 +91,7 @@ class FPLSolver:
         player_clubs: Optional[Dict[int, int]] = None,
         club_gameweeks: Optional[Dict[int, set]] = None,
         no_transfer_gws: Optional[List[int]] = None,
+        wildcard_rate: float = 0.0,
     ):
         """
         Initialize the FPL solver.
@@ -149,6 +150,7 @@ class FPLSolver:
         self.player_clubs = player_clubs or {}
         self.club_gameweeks = club_gameweeks
         self.no_transfer_gws = list(no_transfer_gws or [])
+        self.wildcard_rate = wildcard_rate
         self._club_cache = None
 
         self.players = None
@@ -553,6 +555,13 @@ class FPLSolver:
                 objective_terms.append(
                     self.first_gw_transfer_penalty * self.variables['first_gw_penalty_transfers'][t]
                 )
+
+            if self.wildcard_rate > 0 and self.force_wildcard_gw is None:
+                wc_early_penalty = (15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0
+                if wc_early_penalty > 0:
+                    objective_terms.append(
+                        -wc_early_penalty * self.variables['wildcard'][t]
+                    )
 
         self.prob += pulp.lpSum(objective_terms), "Total_Expected_Points"
         logger.debug("Objective function created")
@@ -1186,17 +1195,29 @@ class FPLSolver:
 
         if first_half_gws:
             remaining_wc_first = max(0, 1 - wc_used_first)
-            self.prob += (
-                pulp.lpSum([self.variables['wildcard'][t] for t in first_half_gws]) <= remaining_wc_first,
-                "Max_Wildcard_First_Half",
-            )
+            if CHIP_WINDOWS['first_half'][1] in [self.start_gw + t - 1 for t in first_half_gws]:
+                self.prob += (
+                    pulp.lpSum([self.variables['wildcard'][t] for t in first_half_gws]) == remaining_wc_first,
+                    "Max_Wildcard_First_Half",
+                )
+            else:
+                self.prob += (
+                    pulp.lpSum([self.variables['wildcard'][t] for t in first_half_gws]) <= remaining_wc_first,
+                    "Max_Wildcard_First_Half",
+                )
 
         if second_half_gws:
             remaining_wc_second = max(0, 1 - wc_used_second)
-            self.prob += (
-                pulp.lpSum([self.variables['wildcard'][t] for t in second_half_gws]) <= remaining_wc_second,
-                "Max_Wildcard_Second_Half",
-            )
+            if CHIP_WINDOWS['second_half'][1] in [self.start_gw + t - 1 for t in second_half_gws]:
+                self.prob += (
+                    pulp.lpSum([self.variables['wildcard'][t] for t in second_half_gws]) == remaining_wc_second,
+                    "Max_Wildcard_Second_Half",
+                )
+            else:
+                self.prob += (
+                    pulp.lpSum([self.variables['wildcard'][t] for t in second_half_gws]) <= remaining_wc_second,
+                    "Max_Wildcard_Second_Half",
+                )
 
         # Force wildcard on a specific GW if requested
         if self.force_wildcard_gw is not None:
@@ -1405,8 +1426,14 @@ class FPLSolver:
 
         logger.debug("Extracting solution")
 
+        wc_penalty_applied = 0.0
+        if self.wildcard_rate > 0 and self.force_wildcard_gw is None:
+            for t in range(1, self.T + 1):
+                if _on(self.variables['wildcard'][t]):
+                    wc_penalty_applied += (15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0
+
         solution = {
-            'objective_value': float(pulp.value(self.prob.objective)),
+            'objective_value': float(pulp.value(self.prob.objective)) + wc_penalty_applied,
             'start_gw': self.start_gw,
             'squads': {},
             'lineups': {},

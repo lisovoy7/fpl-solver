@@ -99,6 +99,7 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         # re-solves AND the no-wildcard twin below must all honour it, or the twin
         # would be allowed moves the real plan was not and the comparison would lie.
         no_transfer_gws=ctx.get("no_transfer_gws"),
+        wildcard_rate=ctx.get("wildcard_rate", 0.0),
     )
     solver.load_predictions(ctx["predictions"])
     if len(solver.predictions) == 0:
