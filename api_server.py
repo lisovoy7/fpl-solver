@@ -385,6 +385,12 @@ class SellingPriceEntry(BaseModel):
     selling_value: float = Field(gt=0, le=30)
 
 
+class RolledTransferEntry(BaseModel):
+    """How many free transfers to leave unused and roll over in a specific gameweek."""
+    gw: int
+    count: int = Field(ge=1, le=5)
+
+
 class OptimizeRequest(BaseModel):
     """Input payload for the /api/optimize endpoint."""
     team_id: int
@@ -427,6 +433,9 @@ class OptimizeRequest(BaseModel):
     # allowed (its moves are not transfers), and a Free Hit week is already frozen.
     # Gameweeks outside the solved horizon are ignored; the caller validates them.
     no_transfer_gws: list[int] = Field(default_factory=list)
+    # Per-gameweek minimum number of free transfers to leave unused and roll over —
+    # e.g. "I have 3 free transfers, roll 2 of them in GW11" -> [{gw: 11, count: 2}].
+    rolled_transfers: list[RolledTransferEntry] = Field(default_factory=list)
     time_limit_per_scenario: int = Field(default=10, ge=5, le=90)
     # MILP engine. HiGHS proves a 0.5% gap on this model in ~5-10s where CBC never
     # closes it and always burns the full time limit — see FPLSolver.solve. "cbc" is
@@ -1563,6 +1572,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "non_playing": non_playing_tuples,
         "banned_players": banned_owned,
         "no_transfer_gws": list(req.no_transfer_gws),
+        "rolled_transfers": [(e.gw, e.count) for e in req.rolled_transfers],
         "first_gw_penalty": -1,
         "sub_probability": 0.0,
         "predictions": predictions,

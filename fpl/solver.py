@@ -91,6 +91,7 @@ class FPLSolver:
         player_clubs: Optional[Dict[int, int]] = None,
         club_gameweeks: Optional[Dict[int, set]] = None,
         no_transfer_gws: Optional[List[int]] = None,
+        rolled_transfers: Optional[List[tuple]] = None,
         wildcard_rate: float = 0.0,
     ):
         """
@@ -150,6 +151,12 @@ class FPLSolver:
         self.player_clubs = player_clubs or {}
         self.club_gameweeks = club_gameweeks
         self.no_transfer_gws = list(no_transfer_gws or [])
+        if isinstance(rolled_transfers, dict):
+            self.rolled_transfers = {int(gw): int(c) for gw, c in rolled_transfers.items()}
+        else:
+            self.rolled_transfers = {}
+            for gw, c in (rolled_transfers or []):
+                self.rolled_transfers[int(gw)] = max(self.rolled_transfers.get(int(gw), 0), int(c))
         self.wildcard_rate = wildcard_rate
         self._club_cache = None
 
@@ -1332,9 +1339,6 @@ class FPLSolver:
 
         Gameweeks outside the horizon are skipped, same as force_wildcard_gw.
         """
-        if not self.no_transfer_gws:
-            return
-
         for actual_gw in sorted(set(self.no_transfer_gws)):
             t = actual_gw - self.start_gw + 1
             if not 1 <= t <= self.T:
@@ -1344,6 +1348,26 @@ class FPLSolver:
                 f"No_Transfer_GW{actual_gw}",
             )
             logger.debug("  No regular transfers in GW %d (transfer rolls)", actual_gw)
+
+        for actual_gw, count in sorted(self.rolled_transfers.items()):
+            t = actual_gw - self.start_gw + 1
+            if not 1 <= t <= self.T or count <= 0:
+                continue
+            self.prob += (
+                self.variables['u'][t]
+                <= self.variables['A'][t] - count + (TOTAL_SQUAD_SIZE + count) * self.variables['wildcard'][t],
+                f"Roll_Transfers_GW{actual_gw}",
+            )
+            # Zero out penalty_transfers across the window that builds A[t] so the MILP
+            # cannot pay a phantom -4 hit on a free transfer in an earlier gameweek just
+            # to manufacture a fake banked transfer for GW `actual_gw`.
+            first_no_hit_t = t if count == 1 else 1
+            for s in range(first_no_hit_t, t + 1):
+                self.prob += (
+                    self.variables['penalty_transfers'][s] == 0,
+                    f"Roll_No_Phantom_Hit_GW{actual_gw}_{s}",
+                )
+            logger.debug("  Roll at least %d free transfer(s) in GW %d", count, actual_gw)
 
     def build_model(self) -> None:
         """Build the complete MILP model."""

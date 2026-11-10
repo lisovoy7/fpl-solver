@@ -52,22 +52,35 @@ def _predictions():
     return pd.DataFrame(rows)
 
 
-def _solver(no_transfer_gws=None, free_transfers=1, wildcard_available=False,
-            force_wildcard_gw=None):
+def _solver(no_transfer_gws=None, rolled_transfers=None, free_transfers=1,
+            wildcard_available=False, force_wildcard_gw=None, extra_replacements=0):
+    extra_ids = [202 + i for i in range(extra_replacements)]
+    pool = POOL + extra_ids
+    positions = POSITIONS | {p: 'DEF' for p in extra_ids}
+    weak_set = {DEFS[i] for i in range(1 + extra_replacements)}
+    strong_set = {REPLACEMENT, *extra_ids}
+
+    rows = []
+    for gw in range(START_GW, START_GW + HORIZON):
+        for p in pool:
+            pts = 1.0 if p in weak_set else (8.0 if p in strong_set else 4.0)
+            rows.append({'element': p, 'event': gw, 'predicted_points': pts})
+
     solver = FPLSolver(
         planning_horizon=HORIZON,
         budget=1000,
         start_gw=START_GW,
         no_transfer_gws=no_transfer_gws,
+        rolled_transfers=rolled_transfers,
         force_wildcard_gw=force_wildcard_gw,
     )
-    solver.load_predictions(_predictions())
+    solver.load_predictions(pd.DataFrame(rows))
     solver.players = pd.DataFrame({
-        'element': POOL,
-        'name': [str(p) for p in POOL],
-        'position': [POSITIONS[p] for p in POOL],
-        'value': [50] * len(POOL),
-        'team': [(i % 10) + 1 for i in range(len(POOL))],
+        'element': pool,
+        'name': [str(p) for p in pool],
+        'position': [positions[p] for p in pool],
+        'value': [50] * len(pool),
+        'team': [(i % 10) + 1 for i in range(len(pool))],
     })
     solver.set_initial_squad(list(SQUAD), available_transfers=free_transfers)
     solver.set_chip_state(
@@ -133,6 +146,53 @@ def test_gameweek_outside_the_horizon_is_ignored():
     assert not any(n.startswith("No_Transfer_GW") for n in solver.prob.constraints)
     solution = _solve(solver)
     assert solution['transfers'][1]['count'] == 1
+
+
+def test_partial_roll_spends_one_and_rolls_two():
+    """With 3 free transfers and 3 upgrades worth making, asking to roll 2 in GW1
+    spends 1 transfer in GW1 and rolls the other 2 (entering GW2 with 3)."""
+    free_sol = _solve(_solver(free_transfers=3, extra_replacements=2))
+    assert free_sol['transfers'][1]['count'] == 3
+    assert free_sol['transfers'][2]['available_transfers'] == 1
+
+    rolled_sol = _solve(_solver(
+        rolled_transfers=[(START_GW, 2)],
+        free_transfers=3,
+        extra_replacements=2,
+    ))
+    assert rolled_sol['transfers'][1]['count'] == 1
+    assert rolled_sol['transfers'][1]['available_transfers'] == 3
+    assert rolled_sol['transfers'][2]['available_transfers'] == 3
+    assert rolled_sol['transfers'][2]['count'] == 2
+
+
+def test_rolling_two_in_second_gw_banks_first_gw_honestly():
+    """Starting with 1 FT, rolling 2 in GW2 requires making 0 moves in GW1 and 0 in GW2 —
+    and the solver must not fake a -4 hit in GW1 to manufacture a second FT."""
+    sol = _solve(_solver(
+        rolled_transfers=[(START_GW + 1, 2)],
+        free_transfers=1,
+        extra_replacements=2,
+    ))
+    assert sol['transfers'][1]['count'] == 0
+    assert sol['transfers'][1]['paid_transfers'] == 0
+    assert sol['transfers'][2]['available_transfers'] == 2
+    assert sol['transfers'][2]['count'] == 0
+    assert sol['transfers'][3]['available_transfers'] == 3
+
+
+def test_wildcard_in_partially_rolled_gw_is_still_allowed():
+    solver = _solver(
+        rolled_transfers=[(START_GW, 2)],
+        free_transfers=3,
+        wildcard_available=True,
+        force_wildcard_gw=START_GW,
+        extra_replacements=2,
+    )
+    sol = _solve(solver)
+    assert sol['transfers'][1]['wildcard_active']
+    assert sol['transfers'][1]['count'] == 3
+    assert sol['transfers'][1]['paid_transfers'] == 0
 
 
 if __name__ == "__main__":

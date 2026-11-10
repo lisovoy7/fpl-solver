@@ -116,7 +116,7 @@ def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
 
     for key in ("non_playing", "forced_lineup", "points_multiplier",
                 "excluded_players", "extra_players", "fixture_overrides",
-                "no_transfer_gws"):
+                "no_transfer_gws", "rolled_transfers"):
         if key not in config:
             config[key] = []
 
@@ -194,6 +194,15 @@ def get_player_overrides(config: dict[str, Any]) -> dict[str, Any]:
                 result.append((int(pid), float(mult)))
         return result
 
+    def to_rolled_transfers_tuples(items: list) -> list[tuple[int, int]]:
+        result = []
+        for item in items:
+            gw = item.get("gw") or item.get("gameweek")
+            count = item.get("count") if item.get("count") is not None else item.get("transfers")
+            if gw is not None and count is not None:
+                result.append((int(gw), int(count)))
+        return result
+
     return {
         "non_playing": to_non_playing_tuples(config.get("non_playing") or []),
         "forced_lineup": to_non_playing_tuples(config.get("forced_lineup") or []),
@@ -201,4 +210,5 @@ def get_player_overrides(config: dict[str, Any]) -> dict[str, Any]:
         "excluded_players": [int(p) for p in (config.get("excluded_players") or [])],
         "extra_players": [int(p) for p in (config.get("extra_players") or [])],
         "no_transfer_gws": [int(g) for g in (config.get("no_transfer_gws") or [])],
+        "rolled_transfers": to_rolled_transfers_tuples(config.get("rolled_transfers") or []),
     }
