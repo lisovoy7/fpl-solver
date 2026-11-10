@@ -62,6 +62,29 @@ POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 # candidates were the only ones ever observed winning.
 CHIP_RESELECT_TOP_K = 3
 
+# Players the solver will never recommend buying on its own (e.g. rotation risk
+# with a returning starter), while leaving managers who already own them — or
+# who explicitly asked for them via extra_players / forced_lineup — completely
+# untouched with their normal predictions.
+# 31 = Ezri Konsa (Arsenal, rotation risk with Saliba).
+NO_BUY_PLAYERS: set[int] = {31}
+
+# Per-player, per-gameweek explicit xP overrides (`{player_id: {gw: xp}}`).
+# Replaces only the listed gameweeks for that player; any gameweek not listed
+# keeps the player's normal baseline prediction. Overridden players are also
+# added to the solver's candidate pool so they are eligible to buy even if they
+# have not yet met the recent-starts threshold.
+# 6 = William Saliba (Arsenal): 0.5 in GW11, 0.6x of Gabriel (4) in GW12-38.
+GW_POINT_OVERRIDES: dict[int, dict[int, float]] = {
+    6: {
+        11: 0.50, 12: 3.09, 13: 3.47, 14: 3.47, 15: 3.44, 16: 3.44,
+        17: 3.14, 18: 3.14, 19: 3.56, 20: 3.44, 21: 3.14, 22: 3.44,
+        23: 2.90, 24: 3.51, 25: 3.14, 26: 3.56, 27: 3.47, 28: 3.56,
+        29: 3.47, 30: 3.56, 31: 3.14, 32: 3.44, 33: 3.47, 34: 3.44,
+        35: 3.47, 36: 3.56, 37: 3.47, 38: 3.51,
+    },
+}
+
 app = FastAPI(title="fpl-solver API", version="1.0.0")
 
 app.add_middleware(
@@ -643,6 +666,62 @@ def _apply_points_multipliers(
             entry.player, entry.multiplier, int(mask.sum()),
             before, float(out.loc[mask, "predicted_points"].sum()),
         )
+    return out
+
+
+def _apply_gw_point_overrides(
+    predictions: pd.DataFrame,
+    bootstrap: dict,
+    overrides: Optional[Dict[int, Dict[int, float]]] = None,
+) -> pd.DataFrame:
+    """
+    Override predicted_points for specific (player_id, gw) pairs while keeping
+    every other gameweek for that player at its normal baseline prediction.
+
+    Works both for regular starters who already have baseline rows in
+    `predictions` and for players with 0 minutes who have no rows yet.
+    """
+    active = overrides if overrides is not None else GW_POINT_OVERRIDES
+    if not active:
+        return predictions
+
+    out = predictions.copy()
+    elements = {int(e["id"]): e for e in bootstrap.get("elements", [])}
+    new_rows: list[dict] = []
+
+    for pid, gw_map in active.items():
+        if not gw_map:
+            continue
+        el = elements.get(int(pid), {})
+        name = f"{el.get('first_name', '')} {el.get('second_name', '')}".strip() or str(pid)
+        pos = POSITION_MAP.get(el.get("element_type", 0), "UNKNOWN")
+        team_id = el.get("team")
+        existing_hist = (
+            int(out.loc[out["element"] == pid, "hist_games"].max())
+            if "hist_games" in out.columns and (out["element"] == pid).any()
+            else 0
+        )
+
+        override_gws = {int(g) for g in gw_map.keys()}
+        out = out[~((out["element"] == int(pid)) & (out["event"].isin(override_gws)))]
+
+        for gw, xp in sorted(gw_map.items()):
+            row: dict[str, Any] = {
+                "element": int(pid),
+                "event": int(gw),
+                "predicted_points": float(xp),
+                "name": name,
+                "position": pos,
+                "player_team_id": team_id,
+            }
+            if "hist_games" in out.columns:
+                row["hist_games"] = existing_hist
+            if "component_type" in out.columns:
+                row["component_type"] = "override"
+            new_rows.append(row)
+
+    if new_rows:
+        out = pd.concat([out, pd.DataFrame(new_rows)], ignore_index=True)
     return out
 
 
@@ -1263,35 +1342,34 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             predictions_through_gw = None
             predictions = _apply_points_multipliers(predictions, _global_points_multipliers())
 
-    # Then this run's own overrides, on top. Applied before anything reads the numbers —
-    # the candidate pool included. See _apply_points_multipliers; the ordering is the
-    # reason this is not left to the solver's own points_multiplier_override. A player
-    # named both here and in app_config ends up with both factors, which is the honest
-    # reading of "the standing correction, plus what the user just asked for".
+    # Then standing per-GW point overrides and this run's own overrides, on top.
+    # Applied before anything reads the numbers — the candidate pool included.
+    predictions = _apply_gw_point_overrides(predictions, bootstrap)
     predictions = _apply_points_multipliers(predictions, req.points_multiplier)
 
-    # Every owned player must exist in the pool or the model is infeasible rather
-    # than merely suboptimal — see ensure_players_present. Applied after
-    # generate_predictions so the synthesized rows never reach the averages.
+    # Every owned player (and any player with explicit GW point overrides) must
+    # exist in gw_data so the solver has his price even if he has 0 minutes played.
     gw_data, unknown_squad_players = proxy_predict.ensure_players_present(
-        gw_data, current_squad, bootstrap
+        gw_data,
+        list(dict.fromkeys(list(current_squad) + list(GW_POINT_OVERRIDES.keys()))),
+        bootstrap,
     )
-    if unknown_squad_players:
+    unknown_owned = [p for p in unknown_squad_players if p in set(current_squad)]
+    if unknown_owned:
         raise ValueError(
             "FPL has no player data for squad member(s) "
-            f"{unknown_squad_players} — cannot build a plan around them"
+            f"{unknown_owned} — cannot build a plan around them"
         )
 
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
-    # forced_lineup players are promoted too, mirroring run.py: a forced start is only
-    # enforceable if the player is in the candidate pool at all, so without this the
-    # constraint is silently dropped for anyone who didn't clear min_hist_pct — the
-    # caller's instruction disappears with no error and a plausible plan comes back.
+    # forced_lineup and GW_POINT_OVERRIDES players are promoted too so they are
+    # always eligible to buy in the candidate pool.
     must_include = list(dict.fromkeys(
         list(current_squad)
         + list(req.extra_players)
         + [e.player for e in req.forced_lineup]
+        + list(GW_POINT_OVERRIDES.keys())
     ))
     # An excluded player the manager already OWNS must stay in the pool: dropping
     # him removes his x variable, the squad-size constraint opens on 14 of 15, and
@@ -1301,7 +1379,10 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # treatment: out of the candidate pool entirely.
     owned_set = set(current_squad)
     banned_owned = [p for p in req.excluded_players if p in owned_set]
-    pool_exclude = [p for p in req.excluded_players if p not in owned_set]
+    pool_exclude = list(dict.fromkeys(
+        [p for p in req.excluded_players if p not in owned_set]
+        + [p for p in NO_BUY_PLAYERS if p not in set(must_include)]
+    ))
     # Parameters from app_config, not from this file — fpl-lad's player_eligibility view
     # reads the same row so Alfie's prediction rankings and this candidate pool always
     # mean the same thing by "worth considering". See _eligibility_config.
@@ -1871,6 +1952,7 @@ async def generate_predictions_cron(secret: str = Query(...)):
     # player per gameweek — simplest shape for both Alfie's SQL and the solver
     # (which already sums per (element, event) itself when it loads predictions).
     totals = predictions.groupby(["element", "event"], as_index=False)["predicted_points"].sum()
+    totals = _apply_gw_point_overrides(totals, bootstrap)
 
     generated_at = datetime.now(timezone.utc).isoformat()
     # The last gameweek of real history behind these numbers — the same value
