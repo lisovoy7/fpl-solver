@@ -86,33 +86,32 @@ def generate_chip_scenarios(
         if CHIP_WINDOWS["second_half"][0] <= gw <= CHIP_WINDOWS["second_half"][1]
     ]
 
-    # --- FH scenarios ---
-    if force_free_hit_gw is not None:
-        fh_scenarios: List[Dict] = [
-            {"name": f"FH GW{force_free_hit_gw}", "free_hit_gws": [force_free_hit_gw]},
-        ]
-        logger.debug("Free Hit forced on GW %d — skipping FH enumeration", force_free_hit_gw)
-    else:
-        remaining_fh_first = max(0, 1 - free_hits_used_first_half)
-        remaining_fh_second = max(0, 1 - free_hits_used_second_half)
+    # --- FH scenarios (evaluated independently per half-season) ---
+    remaining_fh_first = max(0, 1 - free_hits_used_first_half)
+    remaining_fh_second = max(0, 1 - free_hits_used_second_half)
 
-        must_use_fh = (
-            (remaining_fh_first > 0 and CHIP_WINDOWS["first_half"][1] in first_half_gws)
-            or (remaining_fh_second > 0 and CHIP_WINDOWS["second_half"][1] in second_half_gws)
-        )
-        fh_scenarios = [] if must_use_fh else [{"name": "No Free Hit", "free_hit_gws": []}]
-        if remaining_fh_first > 0 and first_half_gws:
-            for gw in first_half_gws:
-                fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
-        if remaining_fh_second > 0 and second_half_gws:
-            for gw in second_half_gws:
-                fh_scenarios.append({"name": f"FH GW{gw}", "free_hit_gws": [gw]})
-        if remaining_fh_first > 0 and remaining_fh_second > 0 and first_half_gws and second_half_gws:
-            for gw1 in first_half_gws:
-                for gw2 in second_half_gws:
-                    fh_scenarios.append({
-                        "name": f"FH GW{gw1}+{gw2}", "free_hit_gws": [gw1, gw2],
-                    })
+    if force_free_hit_gw is not None and force_free_hit_gw in first_half_gws:
+        fh_first_opts: List[List[int]] = [[force_free_hit_gw]]
+    elif remaining_fh_first > 0 and first_half_gws:
+        must_use_first = CHIP_WINDOWS["first_half"][1] in first_half_gws and len(first_half_gws) >= 2
+        fh_first_opts = ([] if must_use_first else [[]]) + [[gw] for gw in first_half_gws]
+    else:
+        fh_first_opts = [[]]
+
+    if force_free_hit_gw is not None and force_free_hit_gw in second_half_gws:
+        fh_second_opts: List[List[int]] = [[force_free_hit_gw]]
+    elif remaining_fh_second > 0 and second_half_gws:
+        must_use_second = CHIP_WINDOWS["second_half"][1] in second_half_gws and len(second_half_gws) >= 2
+        fh_second_opts = ([] if must_use_second else [[]]) + [[gw] for gw in second_half_gws]
+    else:
+        fh_second_opts = [[]]
+
+    fh_scenarios: List[Dict] = []
+    for opt1 in fh_first_opts:
+        for opt2 in fh_second_opts:
+            gws = opt1 + opt2
+            name = " + ".join(f"FH GW{gw}" for gw in gws) if gws else "No Free Hit"
+            fh_scenarios.append({"name": name, "free_hit_gws": gws})
 
     # --- BB options ---
     if force_bench_boost_gw is not None:

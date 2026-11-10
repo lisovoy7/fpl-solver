@@ -556,8 +556,9 @@ class FPLSolver:
                     self.first_gw_transfer_penalty * self.variables['first_gw_penalty_transfers'][t]
                 )
 
-            if self.wildcard_rate > 0 and self.force_wildcard_gw is None:
-                wc_early_penalty = (15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0
+            if self.wildcard_rate > 0 and actual_gw != self.force_wildcard_gw:
+                is_cutoff_gw = actual_gw in (CHIP_WINDOWS['first_half'][1], CHIP_WINDOWS['second_half'][1])
+                wc_early_penalty = 0.0 if is_cutoff_gw else ((15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0)
                 if wc_early_penalty > 0:
                     objective_terms.append(
                         -wc_early_penalty * self.variables['wildcard'][t]
@@ -1193,9 +1194,19 @@ class FPLSolver:
         wc_used_first = chips_used.get('wildcard_first_half', 0)
         wc_used_second = chips_used.get('wildcard_second_half', 0)
 
+        blocked_internal = {
+            gw - self.start_gw + 1
+            for gw in ([self.bench_boost_gw, self.triple_captain_gw] + list(self.free_hit_gws))
+            if gw and gw > 0
+        }
+
         if first_half_gws:
             remaining_wc_first = max(0, 1 - wc_used_first)
-            if CHIP_WINDOWS['first_half'][1] in [self.start_gw + t - 1 for t in first_half_gws]:
+            unblocked_first = [t for t in first_half_gws if t not in blocked_internal]
+            if (
+                CHIP_WINDOWS['first_half'][1] in [self.start_gw + t - 1 for t in first_half_gws]
+                and len(unblocked_first) >= remaining_wc_first
+            ):
                 self.prob += (
                     pulp.lpSum([self.variables['wildcard'][t] for t in first_half_gws]) == remaining_wc_first,
                     "Max_Wildcard_First_Half",
@@ -1208,7 +1219,11 @@ class FPLSolver:
 
         if second_half_gws:
             remaining_wc_second = max(0, 1 - wc_used_second)
-            if CHIP_WINDOWS['second_half'][1] in [self.start_gw + t - 1 for t in second_half_gws]:
+            unblocked_second = [t for t in second_half_gws if t not in blocked_internal]
+            if (
+                CHIP_WINDOWS['second_half'][1] in [self.start_gw + t - 1 for t in second_half_gws]
+                and len(unblocked_second) >= remaining_wc_second
+            ):
                 self.prob += (
                     pulp.lpSum([self.variables['wildcard'][t] for t in second_half_gws]) == remaining_wc_second,
                     "Max_Wildcard_Second_Half",
@@ -1219,7 +1234,8 @@ class FPLSolver:
                     "Max_Wildcard_Second_Half",
                 )
 
-        # Force wildcard on a specific GW if requested
+        # Force wildcard on a specific GW if requested (scoped to that GW's half-season
+        # so forcing a 2nd-half wildcard does not block an unspent 1st-half wildcard).
         if self.force_wildcard_gw is not None:
             wc_internal = self.force_wildcard_gw - self.start_gw + 1
             if 1 <= wc_internal <= self.T:
@@ -1227,7 +1243,12 @@ class FPLSolver:
                     self.variables['wildcard'][wc_internal] == 1,
                     f"Force_Wildcard_GW{self.force_wildcard_gw}",
                 )
-                for t in gameweeks:
+                same_half_gws = (
+                    first_half_gws
+                    if self.force_wildcard_gw <= CHIP_WINDOWS['first_half'][1]
+                    else second_half_gws
+                )
+                for t in same_half_gws:
                     if t != wc_internal:
                         self.prob += (
                             self.variables['wildcard'][t] == 0,
@@ -1427,10 +1448,12 @@ class FPLSolver:
         logger.debug("Extracting solution")
 
         wc_penalty_applied = 0.0
-        if self.wildcard_rate > 0 and self.force_wildcard_gw is None:
+        if self.wildcard_rate > 0:
             for t in range(1, self.T + 1):
-                if _on(self.variables['wildcard'][t]):
-                    wc_penalty_applied += (15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0
+                actual_gw = self.start_gw + t - 1
+                if _on(self.variables['wildcard'][t]) and actual_gw != self.force_wildcard_gw:
+                    is_cutoff_gw = actual_gw in (CHIP_WINDOWS['first_half'][1], CHIP_WINDOWS['second_half'][1])
+                    wc_penalty_applied += 0.0 if is_cutoff_gw else ((15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0)
 
         solution = {
             'objective_value': float(pulp.value(self.prob.objective)) + wc_penalty_applied,

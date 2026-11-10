@@ -1350,22 +1350,49 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         req.triple_captain_used, "triple_captain_used"
     )
 
+    # While planning from inside the first half of the season (GW1-19), keep all
+    # second-half chips unavailable behind the scenes unless the caller explicitly
+    # pinned that chip to a second-half gameweek (GW20+).
+    first_half_end = CHIP_WINDOWS["first_half"][1]
+    if current_gw <= first_half_end:
+        if req.force_wildcard_gw is None or req.force_wildcard_gw <= first_half_end:
+            wildcard_second_half = 1
+        if req.force_free_hit_gw is None or req.force_free_hit_gw <= first_half_end:
+            free_hits_used_second_half = 1
+        if req.force_bench_boost_gw is None or req.force_bench_boost_gw <= first_half_end:
+            bench_boost_used_second_half = 1
+        if req.force_triple_captain_gw is None or req.force_triple_captain_gw <= first_half_end:
+            triple_captain_used_second_half = 1
+
     # Neither chip changes anything about the plan except which GW it lands
     # on relative to its own already-solved lineup (Triple Captain exactly;
     # Bench Boost approximately — see find_best_bench_boost_gw). So solve
     # FH-only with both off, then score+place both post-hoc instead of
-    # multiplying either into the scenario count. Skipped per-chip when that
-    # chip is forced or fully spent.
-    defer_bench_boost = (
+    # multiplying either into the scenario count. Skipped per-half when that
+    # half's chip is forced or already spent.
+    defer_bb_first = (
         req.use_chips
-        and req.force_bench_boost_gw is None
-        and (bench_boost_used_first_half < 1 or bench_boost_used_second_half < 1)
+        and bench_boost_used_first_half < 1
+        and (req.force_bench_boost_gw is None or req.force_bench_boost_gw > first_half_end)
     )
-    defer_triple_captain = (
+    defer_bb_second = (
         req.use_chips
-        and req.force_triple_captain_gw is None
-        and (triple_captain_used_first_half < 1 or triple_captain_used_second_half < 1)
+        and bench_boost_used_second_half < 1
+        and (req.force_bench_boost_gw is None or req.force_bench_boost_gw <= first_half_end)
     )
+    defer_bench_boost = defer_bb_first or defer_bb_second
+
+    defer_tc_first = (
+        req.use_chips
+        and triple_captain_used_first_half < 1
+        and (req.force_triple_captain_gw is None or req.force_triple_captain_gw > first_half_end)
+    )
+    defer_tc_second = (
+        req.use_chips
+        and triple_captain_used_second_half < 1
+        and (req.force_triple_captain_gw is None or req.force_triple_captain_gw <= first_half_end)
+    )
+    defer_triple_captain = defer_tc_first or defer_tc_second
 
     if not req.use_chips:
         chip_scenarios = [{"name": "No chips", "free_hit_gws": [], "bench_boost_gw": -1, "triple_captain_gw": -1, "force_wildcard_gw": None}]
@@ -1374,10 +1401,10 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             start_gw=current_gw, planning_horizon=horizon,
             free_hits_used_first_half=free_hits_used_first_half,
             free_hits_used_second_half=free_hits_used_second_half,
-            bench_boost_used_first_half=1 if defer_bench_boost else bench_boost_used_first_half,
-            bench_boost_used_second_half=1 if defer_bench_boost else bench_boost_used_second_half,
-            triple_captain_used_first_half=1 if defer_triple_captain else triple_captain_used_first_half,
-            triple_captain_used_second_half=1 if defer_triple_captain else triple_captain_used_second_half,
+            bench_boost_used_first_half=1 if defer_bb_first else bench_boost_used_first_half,
+            bench_boost_used_second_half=1 if defer_bb_second else bench_boost_used_second_half,
+            triple_captain_used_first_half=1 if defer_tc_first else triple_captain_used_first_half,
+            triple_captain_used_second_half=1 if defer_tc_second else triple_captain_used_second_half,
             force_free_hit_gw=req.force_free_hit_gw,
             force_bench_boost_gw=req.force_bench_boost_gw,
             force_triple_captain_gw=req.force_triple_captain_gw,
@@ -1411,7 +1438,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # in that week (minus a small early-use penalty). Ranking by raw FH dream-team
     # points picks the exact same two weeks for every manager in the game; ranking by
     # uplift picks the weeks where THIS manager's squad actually has a fixture crunch.
-    if req.fh_top_k is not None and fh_benefits and req.force_free_hit_gw is None:
+    if req.fh_top_k is not None and fh_benefits:
         fh_scens = [s for s in chip_scenarios if s["free_hit_gws"]]
         if len(fh_scens) > req.fh_top_k:
             squad_df = predictions[predictions["element"].isin(current_squad)]
@@ -1562,13 +1589,13 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # together buys little given both get a full re-solve below anyway.
     bb_gws = bench_boost_candidate_gws(
         start_gw=current_gw, planning_horizon=horizon,
-        used_first_half=bench_boost_used_first_half,
-        used_second_half=bench_boost_used_second_half,
+        used_first_half=0 if defer_bb_first else 1,
+        used_second_half=0 if defer_bb_second else 1,
     ) if defer_bench_boost else []
     tc_gws = triple_captain_candidate_gws(
         start_gw=current_gw, planning_horizon=horizon,
-        used_first_half=triple_captain_used_first_half,
-        used_second_half=triple_captain_used_second_half,
+        used_first_half=0 if defer_tc_first else 1,
+        used_second_half=0 if defer_tc_second else 1,
     ) if defer_triple_captain else []
 
     def _place_bb_tc(result: dict) -> Tuple[Optional[int], Optional[int], float]:
@@ -1578,29 +1605,31 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             for t, tr in result["solution"]["transfers"].items()
             if tr.get("wildcard_active")
         ]
+        forced_bb = result["scenario"]["bench_boost_gw"]
+        forced_tc = result["scenario"]["triple_captain_gw"]
 
         if defer_bench_boost:
             bb_gw, bb_bonus = find_best_bench_boost_gw(
                 lineups_by_t=result["solution"]["lineups"],
                 expected_points=result["squad_points"],
-                wildcard_gws=wildcard_gws,
+                wildcard_gws=wildcard_gws + ([forced_bb] if forced_bb != -1 else []),
                 start_gw=current_gw, horizon=horizon,
                 free_hit_gws=result["free_hit_gws"],
-                triple_captain_gw=-1,
+                triple_captain_gw=forced_tc,
                 candidate_gws=bb_gws,
                 sub_probability=0.0,
             )
         else:
             # Already baked into this scenario's own full solve (forced, or
             # not available to defer in the first place) — nothing to add.
-            bb_gw = result["bench_boost_gw"] if result["bench_boost_gw"] != -1 else None
+            bb_gw = forced_bb if forced_bb != -1 else None
             bb_bonus = 0.0
 
         if defer_triple_captain:
             tc_gw, tc_bonus = find_best_triple_captain_gw(
                 captains_by_t=result["solution"]["captains"],
                 expected_points=result["squad_points"],
-                wildcard_gws=wildcard_gws,
+                wildcard_gws=wildcard_gws + ([forced_bb] if forced_bb != -1 else []) + ([forced_tc] if forced_tc != -1 else []),
                 start_gw=current_gw, horizon=horizon,
                 free_hit_gws=result["free_hit_gws"],
                 bench_boost_gw=bb_gw if bb_gw is not None else -1,
@@ -1608,8 +1637,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
                 sub_probability=0.0,
             )
         else:
-            tc_gw = result["scenario"]["triple_captain_gw"]
-            tc_gw = tc_gw if tc_gw != -1 else None
+            tc_gw = forced_tc if forced_tc != -1 else None
             tc_bonus = 0.0
 
         return bb_gw, tc_gw, (bb_bonus or 0.0) + (tc_bonus or 0.0)
