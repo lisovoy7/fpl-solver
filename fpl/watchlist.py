@@ -6,7 +6,7 @@ All data passed as parameters; no hardcoded file paths.
 import logging
 import math
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -319,6 +319,45 @@ def create_watchlist(
         logger.info("Watchlist: %d players", len(watchlist_ids))
 
     return watchlist_ids
+
+
+def zero_ineligible_squad_predictions(
+    predictions: pd.DataFrame,
+    current_squad: Iterable[int],
+    eligible_ids: Iterable[int],
+) -> Tuple[pd.DataFrame, List[int]]:
+    """
+    Set predicted_points to 0.0 for owned squad players who did not qualify for
+    `eligible_ids` (the watchlist built without current_squad in must_include).
+
+    Every owned player must stay in the solver's candidate pool (`watchlist`) so
+    initial-squad and squad-flow constraints remain feasible. However, keeping
+    their per-appearance point projections when they failed the recent-starts or
+    absent-streak filter makes the solver treat a fringe player with 1-2 recent
+    games as a nailed starter — starting him, counting his points on Bench Boost,
+    and seeing no reason to transfer him out. Zeroing their predicted_points
+    while keeping them in the pool lets the solver hold them on the bench or
+    sell them as 0-point players, while preserving projections for anyone
+    explicitly promoted via `extra_players`, `forced_lineup`, or
+    `GW_POINT_OVERRIDES`.
+    """
+    eligible_set = {int(p) for p in eligible_ids}
+    ineligible_owned = [
+        int(p) for p in dict.fromkeys(current_squad) if int(p) not in eligible_set
+    ]
+    if not ineligible_owned or predictions.empty:
+        return predictions, ineligible_owned
+
+    out = predictions.copy()
+    mask = out["element"].isin(ineligible_owned)
+    if mask.any():
+        out.loc[mask, "predicted_points"] = 0.0
+        logger.info(
+            "Zeroed predicted_points for %d ineligible squad player(s): %s",
+            len(ineligible_owned),
+            ineligible_owned,
+        )
+    return out, ineligible_owned
 
 
 # EXPERIMENTAL — opt-in only via the `bucket_top_n` request field; default

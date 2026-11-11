@@ -43,7 +43,11 @@ from fpl.free_hit import (
     triple_captain_candidate_gws, find_best_triple_captain_gw,
     bench_boost_candidate_gws, find_best_bench_boost_gw,
 )
-from fpl.watchlist import create_watchlist, apply_price_bucket_filter
+from fpl.watchlist import (
+    create_watchlist,
+    apply_price_bucket_filter,
+    zero_ineligible_squad_predictions,
+)
 from fpl.scenario_runner import build_solver, solve_scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1373,12 +1377,15 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
     # forced_lineup and GW_POINT_OVERRIDES players are promoted too so they are
-    # always eligible to buy in the candidate pool.
-    must_include = list(dict.fromkeys(
-        list(current_squad)
-        + list(req.extra_players)
+    # always eligible to buy in the candidate pool and keep their predictions.
+    explicit_include = list(dict.fromkeys(
+        list(req.extra_players)
         + [e.player for e in req.forced_lineup]
         + list(GW_POINT_OVERRIDES.keys())
+    ))
+    must_include = list(dict.fromkeys(
+        list(current_squad)
+        + explicit_include
     ))
     # An excluded player the manager already OWNS must stay in the pool: dropping
     # him removes his x variable, the squad-size constraint opens on 14 of 15, and
@@ -1399,19 +1406,32 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else eligibility["min_hist_pct"]
+    absent_streak_games = 0 if use_proxy else eligibility["absent_streak_games"]
     # max_gw holds the start filter to the same gameweek the points were priced from. The
     # history sync lands an hour before predictions regenerate, so without this every sync
     # opens an hour in which a player can clear the filter on a match his own prediction
     # never saw — and that is exactly the match whose absence inflates him.
+    eligible_watchlist = create_watchlist(
+        predictions, gw_data,
+        min_hist_pct=min_hist_pct,
+        max_hist_window=eligibility["max_hist_window"],
+        min_minutes=eligibility["min_minutes"],
+        absent_streak_games=absent_streak_games,
+        must_include=explicit_include, must_exclude=pool_exclude,
+        max_gw=predictions_through_gw,
+    )
     watchlist = create_watchlist(
         predictions, gw_data,
         min_hist_pct=min_hist_pct,
         max_hist_window=eligibility["max_hist_window"],
         min_minutes=eligibility["min_minutes"],
         # The proxy path has no real minutes to judge a streak by, same as min_hist_pct.
-        absent_streak_games=0 if use_proxy else eligibility["absent_streak_games"],
+        absent_streak_games=absent_streak_games,
         must_include=must_include, must_exclude=pool_exclude,
         max_gw=predictions_through_gw,
+    )
+    predictions, ineligible_owned = zero_ineligible_squad_predictions(
+        predictions, current_squad, eligible_watchlist,
     )
 
     if req.bucket_top_n:
@@ -1505,7 +1525,7 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         chip_scenarios = chip_scenarios[:req.max_scenarios]
 
     forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
-    fh_watchlist = [p for p in watchlist if p not in set(banned_owned)]
+    fh_watchlist = [p for p in watchlist if p not in set(banned_owned) and p not in set(ineligible_owned)]
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
         fh_benefits = calculate_free_hit_benefits_for_horizon(

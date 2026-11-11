@@ -29,7 +29,7 @@ from fpl.free_hit import (
     triple_captain_candidate_gws, find_best_triple_captain_gw,
     bench_boost_candidate_gws, find_best_bench_boost_gw,
 )
-from fpl.watchlist import create_watchlist
+from fpl.watchlist import create_watchlist, zero_ineligible_squad_predictions
 from fpl.scenario_runner import build_solver, default_worker_count, solve_scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -491,12 +491,11 @@ def main() -> None:
     logger.info("Saved predictions to %s (%d rows)", predictions_path, len(predictions))
 
     # 5. Build watchlist
-    must_include = list(current_squad)
-    must_include.extend(overrides.get("extra_players", []))
-    # Auto-promote forced_lineup players into the candidate pool so the
-    # solver can actually start them (otherwise the constraint is silently
-    # skipped if the player didn't pass the recent-minutes threshold).
-    must_include.extend(pid for pid, _ in overrides.get("forced_lineup", []))
+    explicit_include = list(dict.fromkeys(
+        list(overrides.get("extra_players", []))
+        + [pid for pid, _ in overrides.get("forced_lineup", [])]
+    ))
+    must_include = list(dict.fromkeys(list(current_squad) + explicit_include))
     # Owned exclusions stay in the pool and are banned inside the model instead —
     # dropping an owned player's x variable leaves the squad-size constraint stuck
     # at 14 of 15 and every scenario INFEASIBLE. Mirrors api_server.py exactly.
@@ -529,9 +528,17 @@ def main() -> None:
             "— cannot build a plan around them"
         )
 
+    eligible_watchlist = create_watchlist(
+        predictions, gw_data, min_hist_pct=min_hist_pct,
+        max_hist_window=max_hist_window,
+        must_include=explicit_include, must_exclude=must_exclude,
+    )
     watchlist = create_watchlist(predictions, gw_data, min_hist_pct=min_hist_pct,
                                 max_hist_window=max_hist_window,
                                 must_include=must_include, must_exclude=must_exclude)
+    predictions, ineligible_owned = zero_ineligible_squad_predictions(
+        predictions, current_squad, eligible_watchlist,
+    )
 
     # 6. Chip scenarios
     def _chip_halves(key: str) -> Tuple[int, int]:
@@ -621,7 +628,7 @@ def main() -> None:
         fh_benefits = calculate_free_hit_benefits_for_horizon(
             start_gw=current_gw, planning_horizon=horizon, budget=total_budget,
             predictions_df=predictions, gw_data_df=gw_data,
-            watchlist_players=[p for p in watchlist if p not in set(banned_owned)],
+            watchlist_players=[p for p in watchlist if p not in set(banned_owned) and p not in set(ineligible_owned)],
             forced_lineup_players=overrides.get("forced_lineup"),
             points_multiplier_override=overrides.get("points_multiplier"),
             non_playing_players=overrides.get("non_playing"),
