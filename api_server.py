@@ -13,8 +13,9 @@ Endpoints:
 
 import logging
 import os
+import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -738,6 +739,179 @@ def _apply_gw_point_overrides(
     return out
 
 
+_RETURN_DAY_FIRST = re.compile(
+    r"(?:expected back|suspended until)\s+(\d{1,2})\s+([a-z]{3,9})", re.IGNORECASE
+)
+_RETURN_MONTH_FIRST = re.compile(
+    r"(?:expected back|suspended until)\s+([a-z]{3,9})\s+(\d{1,2})", re.IGNORECASE
+)
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+_LAST_GW = 38
+
+
+def _parse_expected_return(news: Optional[str], now: datetime) -> Optional[datetime]:
+    """
+    Parse an expected return date out of an FPL `news` string as UTC midnight.
+
+    Matches `web/lib/fpl/availability.ts`: handles both "Suspended until 5 Dec"
+    and month-first variants, and picks the earliest candidate year that isn't
+    more than 30 days in the past.
+    """
+    if not news:
+        return None
+    m_day = _RETURN_DAY_FIRST.search(news)
+    if m_day:
+        day = int(m_day.group(1))
+        month_tok = m_day.group(2)
+    else:
+        m_mon = _RETURN_MONTH_FIRST.search(news)
+        if not m_mon:
+            return None
+        month_tok = m_mon.group(1)
+        day = int(m_mon.group(2))
+
+    prefix = month_tok[:3].lower()
+    if prefix not in _MONTHS or day < 1 or day > 31:
+        return None
+    month = _MONTHS.index(prefix) + 1
+
+    cutoff = now - timedelta(days=30)
+    candidates = [now.year - 1, now.year, now.year + 1]
+    chosen_year = candidates[-1]
+    for yr in candidates:
+        try:
+            dt = datetime(yr, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if dt >= cutoff:
+            chosen_year = yr
+            break
+
+    try:
+        return datetime(chosen_year, month, day, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _suspended_until_gw(
+    bootstrap: dict,
+    fixtures: Any,
+    now: Optional[datetime] = None,
+) -> Dict[int, int]:
+    """
+    Map `{player_id: last_missed_gw}` for suspended players (`status == 's'`).
+
+    Uses the exact same fixture-based return-date rule as fpl-lad's
+    `deriveUnavailableUntilGw`, scoped strictly to `status == 's'`:
+    - `status == 's'` with a return date in `news` -> GW of the club's first
+      fixture kicking off at or after UTC midnight of the return date, minus 1
+      (or 38 if after the final fixture of the season).
+    - `status == 's'` with no parseable date -> 38.
+    """
+    now_dt = now or datetime.now(timezone.utc)
+    gw_deadlines: Dict[int, str] = {}
+    for ev in bootstrap.get("events", []) or []:
+        ev_id = ev.get("id")
+        dl = ev.get("deadline_time")
+        if ev_id is not None and dl:
+            gw_deadlines[int(ev_id)] = str(dl)
+
+    if isinstance(fixtures, pd.DataFrame):
+        fixture_rows = fixtures.to_dict("records") if not fixtures.empty else []
+    elif isinstance(fixtures, list):
+        fixture_rows = fixtures
+    else:
+        fixture_rows = []
+
+    by_team: Dict[int, List[Tuple[int, datetime]]] = {}
+    for f in fixture_rows:
+        ev_raw = f.get("event")
+        if ev_raw is None or pd.isna(ev_raw):
+            continue
+        ev = int(ev_raw)
+        ko_raw = f.get("kickoff_time")
+        instant = (
+            str(ko_raw)
+            if ko_raw is not None and not pd.isna(ko_raw) and str(ko_raw).strip()
+            else gw_deadlines.get(ev)
+        )
+        if not instant:
+            continue
+        try:
+            ko_dt = datetime.fromisoformat(instant.replace("Z", "+00:00"))
+            if ko_dt.tzinfo is None:
+                ko_dt = ko_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        for side in ("team_h", "team_a"):
+            t_raw = f.get(side)
+            if t_raw is None or pd.isna(t_raw):
+                continue
+            by_team.setdefault(int(t_raw), []).append((ev, ko_dt))
+
+    for team_list in by_team.values():
+        team_list.sort(key=lambda item: item[1])
+
+    suspended: Dict[int, int] = {}
+    for el in bootstrap.get("elements", []) or []:
+        status = str(el.get("status") or "a").lower()
+        if status != "s":
+            continue
+        pid = int(el["id"])
+        team_id = int(el.get("team") or 0)
+        return_dt = _parse_expected_return(el.get("news"), now_dt)
+        if return_dt is None:
+            suspended[pid] = _LAST_GW
+            continue
+
+        first_fit_gw: Optional[int] = None
+        for ev, ko_dt in by_team.get(team_id, []):
+            if ko_dt >= return_dt:
+                first_fit_gw = ev
+                break
+
+        if first_fit_gw is None:
+            suspended[pid] = _LAST_GW
+        elif first_fit_gw - 1 >= 1:
+            suspended[pid] = first_fit_gw - 1
+
+    return suspended
+
+
+def _zero_suspended_predictions(
+    predictions: pd.DataFrame,
+    bootstrap: dict,
+    fixtures: Any,
+    now: Optional[datetime] = None,
+) -> Tuple[pd.DataFrame, Dict[int, int]]:
+    """
+    Set `predicted_points = 0.0` for suspended players (`status == 's'`) in every
+    gameweek up to and including their last suspended gameweek, while keeping
+    their rows in the table and preserving their projections from their return
+    gameweek onwards.
+    """
+    if predictions.empty:
+        return predictions, {}
+
+    suspended = _suspended_until_gw(bootstrap, fixtures, now=now)
+    if not suspended:
+        return predictions, {}
+
+    out = predictions.copy()
+    applied: Dict[int, int] = {}
+    for pid, until_gw in suspended.items():
+        mask = (out["element"] == pid) & (out["event"] <= until_gw)
+        if mask.any():
+            out.loc[mask, "predicted_points"] = 0.0
+            applied[pid] = until_gw
+            logger.info(
+                "suspended_zero_xp: player %d suspended through GW%d — zeroed %d row(s)",
+                pid, until_gw, int(mask.sum()),
+            )
+    return out, applied
+
+
 def _non_free_hit_squad_gw(last_gw: int, free_hit_gws: List[int], first_gw: int = 1) -> int:
     """
     The gameweek whose picks are the squad the manager actually owns.
@@ -1355,10 +1529,12 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             predictions_through_gw = None
             predictions = _apply_points_multipliers(predictions, _global_points_multipliers())
 
-    # Then standing per-GW point overrides and this run's own overrides, on top.
+    # Then standing per-GW point overrides, this run's own overrides, and zeroed
+    # points for suspended players through their suspension return date.
     # Applied before anything reads the numbers — the candidate pool included.
     predictions = _apply_gw_point_overrides(predictions, bootstrap)
     predictions = _apply_points_multipliers(predictions, req.points_multiplier)
+    predictions, _ = _zero_suspended_predictions(predictions, bootstrap, fixtures)
 
     # Every owned player (and any player with explicit GW point overrides) must
     # exist in gw_data so the solver has his price even if he has 0 minutes played.
@@ -1983,6 +2159,7 @@ async def generate_predictions_cron(secret: str = Query(...)):
     # (which already sums per (element, event) itself when it loads predictions).
     totals = predictions.groupby(["element", "event"], as_index=False)["predicted_points"].sum()
     totals = _apply_gw_point_overrides(totals, bootstrap)
+    totals, suspended_zeroed = _zero_suspended_predictions(totals, bootstrap, fixtures)
 
     generated_at = datetime.now(timezone.utc).isoformat()
     # The last gameweek of real history behind these numbers — the same value
@@ -2048,5 +2225,6 @@ async def generate_predictions_cron(secret: str = Query(...)):
         # answer from outside. A sudden 0 here means app_config was emptied, renamed or
         # unreadable — same class of silent failure as fpl-sync's unavailableFlagged.
         "multipliers_applied": {e.player: e.multiplier for e in standing},
+        "suspended_zeroed": suspended_zeroed,
         "elapsed_seconds": elapsed,
     }
