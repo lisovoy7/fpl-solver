@@ -122,12 +122,14 @@ def create_watchlist(
         window_end = data_max_gw if max_gw is None else min(int(max_gw), data_max_gw)
         window_size = min(window_end, max_hist_window)
         window_start = window_end - window_size + 1
-        # The upper bound is new alongside `max_gw`: without it a clamped window still
-        # counts appearances from gameweeks the predictions never saw, which is the exact
-        # mismatch this exists to close.
-        in_window = gw_data[
-            (gw_data[gw_col] >= window_start) & (gw_data[gw_col] <= window_end)
-        ]
+        # Look across all played history up to `window_end`, then take each player's
+        # last `max_hist_window` AVAILABLE fixtures (skipping rows where
+        # `was_unavailable` is true or the player was sent off in under `min_minutes`).
+        # For a player who was fit every week, his last `max_hist_window` available
+        # fixtures ARE `GW window_start..window_end`; for an injured or suspended
+        # player, the window shifts back across the missed weeks so injury/suspension
+        # absences don't masquerade as tactical benchings.
+        up_to_end = gw_data[gw_data[gw_col] <= window_end]
 
         # Only fixtures that have actually been PLAYED count — as opportunities or as
         # anything else. FPL publishes a player's row for an upcoming fixture on matchday,
@@ -135,10 +137,26 @@ def create_watchlist(
         # sync drops those now, but this path must not depend on that having run: the
         # nightly cron lands at 11PM, so for the whole of a matchday the table still holds
         # them. `kickoff_time` is on every row from both real sources.
-        played = _played_only(in_window)
+        played_all = _played_only(up_to_end)
 
-        # The denominator is per player, and it is the number of fixtures his CLUB has
-        # played — not the width of the window.
+        avail_mask = pd.Series(True, index=played_all.index)
+        if "was_unavailable" in played_all.columns:
+            avail_mask &= ~played_all["was_unavailable"].fillna(False).astype(bool)
+        if "red_cards" in played_all.columns:
+            reds = pd.to_numeric(played_all["red_cards"], errors="coerce").fillna(0)
+            mins = pd.to_numeric(played_all["minutes"], errors="coerce").fillna(0)
+            avail_mask &= ~((reds > 0) & (mins < min_minutes))
+
+        avail_played = played_all[avail_mask]
+        order = [gw_col] + (["kickoff_time"] if "kickoff_time" in avail_played.columns else []) + (["fixture"] if "fixture" in avail_played.columns else [])
+        played = (
+            avail_played.sort_values(order)
+            .groupby("element", group_keys=False)
+            .tail(max_hist_window)
+        )
+
+        # The denominator is per player, and it is the number of available fixtures his
+        # CLUB has played (up to `max_hist_window`) — not the width of the calendar window.
         #
         # It used to be `ceil(window_size * min_hist_pct)`, one number for the whole league,
         # which quietly punishes anyone whose club has played fewer matches than the window
@@ -150,9 +168,9 @@ def create_watchlist(
         # all season, to every player at the affected club.
         #
         # FPL's element-summary gives every player at a club a row for each of that club's
-        # fixtures, whether he featured or not, so counting his rows in the window IS his
-        # club's played-fixture count — no team column needed, and a mid-season transfer is
-        # handled for free (he can only be charged for matches he was there for).
+        # fixtures, whether he featured or not, so counting his available rows in the window
+        # IS his available played-fixture count — no team column needed, and a mid-season
+        # transfer is handled for free (he can only be charged for matches he was there for).
         #
         # This mirrors `fixtures_in_window` in fpl-lad's player_eligibility view, so the two
         # sides keep meaning the same thing by "worth considering". The shared thresholds
@@ -178,16 +196,16 @@ def create_watchlist(
         # 2026-10-19: Awoniyi, Brobbey, Fofana and Rashford each had exactly the 4 starts
         # required from 6 — all of them in GW2-5 — and 0 minutes in both of their last two
         # matches, with no injury flag to catch them either. Each sat in the top 5 of his
-        # price bucket. So a player whose club's last `absent_streak_games` played fixtures
+        # price bucket. So a player whose last `absent_streak_games` available played fixtures
         # all went under `min_minutes` for him is out, whatever the window says.
         #
-        # Fixtures, not gameweeks — his own rows ARE his club's fixtures (see above), so a
-        # blank gameweek can't count against him and a DGW counts both legs. Fewer rows than
-        # the streak (a new signing, GW1) means there isn't a streak to judge, so he stays.
+        # Fixtures, not gameweeks — his own available rows ARE his opportunities (see above),
+        # so a blank gameweek or an injury/suspension absence can't count against him and a
+        # DGW counts both legs. Fewer rows than the streak (a new signing, GW1) means there
+        # isn't a streak to judge, so he stays.
         absent_streak: set = set()
         if absent_streak_games > 0:
             # GW first so an undated row can't sort itself to the end and pose as the latest.
-            order = [gw_col] + (["kickoff_time"] if "kickoff_time" in played.columns else [])
             last_n = played.sort_values(order).groupby("element").tail(absent_streak_games)
             streak = last_n.groupby("element")["minutes"].agg(
                 n="size", best=lambda m: m.fillna(0).max()
@@ -196,7 +214,7 @@ def create_watchlist(
                 streak[(streak["n"] >= absent_streak_games) & (streak["best"] < min_minutes)].index
             )
             logger.info(
-                "%d players under %d min in each of their club's last %d played fixtures",
+                "%d players under %d min in each of their last %d available played fixtures",
                 len(absent_streak), min_minutes, absent_streak_games,
             )
         # Kept only for the log line and for callers that still read it: the league-wide
@@ -291,7 +309,9 @@ def create_watchlist(
     #    he passes on 0 appearances — same as the pre-season case where the window is empty
     #    and the filter is effectively off. He still needs a prediction to be in `merged`.
     if required_by_element is not None:
-        required = remaining["element"].map(required_by_element).fillna(0).astype(int)
+        has_played_rows = len(played_all) > 0
+        default_req = 1 if has_played_rows else 0
+        required = remaining["element"].map(required_by_element).fillna(default_req).astype(int)
         filtered = remaining[remaining["recent_hist_games"] >= required]
         filtered = filtered[~filtered["element"].isin(absent_streak)]
     else:

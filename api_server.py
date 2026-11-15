@@ -135,7 +135,11 @@ def _get_gw_data(bootstrap: dict) -> pd.DataFrame:
 # player_eligibility view falls back to, so a missing row degrades identically on
 # both sides rather than making them disagree.
 ELIGIBILITY_DEFAULTS = {
-    "min_hist_pct": 0.6, "max_hist_window": 6, "min_minutes": 55, "absent_streak_games": 2,
+    "min_hist_pct": 0.6,
+    "max_hist_window": 6,
+    "min_minutes": 55,
+    "absent_streak_games": 2,
+    "extra_players": [399],  # 399 = Rayan Cherki
 }
 _ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 ELIGIBILITY_MAX_AGE_SECONDS = 300
@@ -160,6 +164,7 @@ def _eligibility_config() -> dict:
         return _ELIGIBILITY_CACHE["value"]
 
     resolved = dict(ELIGIBILITY_DEFAULTS)
+    resolved["extra_players"] = list(ELIGIBILITY_DEFAULTS["extra_players"])
     if _supabase is not None:
         try:
             resp = (
@@ -172,11 +177,17 @@ def _eligibility_config() -> dict:
             value = (getattr(resp, "data", None) or {}).get("value") or {}
             if isinstance(value, dict):
                 for key, default in ELIGIBILITY_DEFAULTS.items():
-                    if key in value and value[key] is not None:
+                    if key not in value or value[key] is None:
+                        continue
+                    if isinstance(default, list):
+                        if isinstance(value[key], list):
+                            resolved[key] = [int(x) for x in value[key]]
+                    else:
                         resolved[key] = type(default)(value[key])
         except Exception:
             logger.exception("Could not read app_config.player_eligibility — using defaults")
             resolved = dict(ELIGIBILITY_DEFAULTS)
+            resolved["extra_players"] = list(ELIGIBILITY_DEFAULTS["extra_players"])
 
     _ELIGIBILITY_CACHE["value"] = resolved
     _ELIGIBILITY_CACHE["fetched_at"] = time.time()
@@ -1550,12 +1561,19 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             f"{unknown_owned} — cannot build a plan around them"
         )
 
+    # Parameters from app_config, not from this file — fpl-lad's player_eligibility view
+    # reads the same row so Alfie's prediction rankings and this candidate pool always
+    # mean the same thing by "worth considering". See _eligibility_config.
+    eligibility = _eligibility_config()
+
     # extra_players bypasses the min_hist_pct filter — new signings, players just
     # back from injury, anyone with too little recent game time to qualify on merit.
-    # forced_lineup and GW_POINT_OVERRIDES players are promoted too so they are
-    # always eligible to buy in the candidate pool and keep their predictions.
+    # Standing `eligibility["extra_players"]`, `forced_lineup` and `GW_POINT_OVERRIDES`
+    # players are promoted too so they are always eligible to buy in the candidate
+    # pool and keep their predictions.
     explicit_include = list(dict.fromkeys(
         list(req.extra_players)
+        + list(eligibility.get("extra_players", []))
         + [e.player for e in req.forced_lineup]
         + list(GW_POINT_OVERRIDES.keys())
     ))
@@ -1575,10 +1593,6 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         [p for p in req.excluded_players if p not in owned_set]
         + [p for p in NO_BUY_PLAYERS if p not in set(must_include)]
     ))
-    # Parameters from app_config, not from this file — fpl-lad's player_eligibility view
-    # reads the same row so Alfie's prediction rankings and this candidate pool always
-    # mean the same thing by "worth considering". See _eligibility_config.
-    eligibility = _eligibility_config()
     # Synthesized gw_data has nobody with real appearances — the filter would
     # exclude everyone, so it's disabled while proxy predictions are in use.
     min_hist_pct = 0.0 if use_proxy else eligibility["min_hist_pct"]
