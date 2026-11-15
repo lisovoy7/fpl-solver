@@ -201,8 +201,27 @@ def test_thiago_joao_pedro_cherki_and_never_fit():
     )
     assert THIAGO in eligible, "Igor Thiago should be eligible after his 3-match suspension"
     assert JOAO_PEDRO in eligible, "João Pedro should be eligible across his 6 fit appearances"
-    assert CHERKI not in eligible, "Cherki has only 3 starts in his last 6 fit matches"
+    assert CHERKI not in eligible, "Cherki has only 3 starts in his last 6 fit matches without extra_players"
     assert NEVER_FIT not in eligible, "A player with 0 available matches must not pass"
+
+    # When Cherki (399) is included in standing extra_players (must_include), he passes
+    # eligible_watchlist and keeps his full predicted points.
+    eligible_with_cherki = create_watchlist(
+        preds,
+        gw_data,
+        min_hist_pct=0.6,
+        max_hist_window=6,
+        min_minutes=55,
+        absent_streak_games=2,
+        must_include=[CHERKI],
+        max_gw=13,
+    )
+    assert CHERKI in eligible_with_cherki, "Cherki in extra_players must be in eligible_watchlist"
+    adjusted, ineligible = zero_ineligible_squad_predictions(
+        preds, [CHERKI], eligible_with_cherki
+    )
+    assert ineligible == []
+    assert float(adjusted[adjusted["element"] == CHERKI]["predicted_points"].iloc[0]) == 4.5
 
 
 if __name__ == "__main__":
