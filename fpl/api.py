@@ -323,6 +323,7 @@ def fetch_gameweek_data_from_supabase(
                 "transfers_out": h.get("transfers_out", 0),
                 "value": h.get("value", 0),
                 "was_home": was_home,
+                "was_unavailable": bool(h.get("was_unavailable", False)),
                 "yellow_cards": h.get("yellow_cards", 0),
             })
 
