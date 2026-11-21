@@ -139,7 +139,7 @@ ELIGIBILITY_DEFAULTS = {
     "max_hist_window": 6,
     "min_minutes": 55,
     "absent_streak_games": 2,
-    "extra_players": [399],  # 399 = Rayan Cherki
+    "extra_players": [],
 }
 _ELIGIBILITY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 ELIGIBILITY_MAX_AGE_SECONDS = 300
