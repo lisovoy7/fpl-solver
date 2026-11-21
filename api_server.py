@@ -457,10 +457,10 @@ class OptimizeRequest(BaseModel):
     # closes it and always burns the full time limit — see FPLSolver.solve. "cbc" is
     # the rollback switch; a HiGHS scenario that finds nothing retries on CBC anyway.
     solver: Literal["highs", "cbc"] = "highs"
-    # Stop each solve once within this relative gap of the best possible plan. 0.005 on
-    # a ~700-point horizon is ~3.5 pts of slack in theory; measured, the plans landed
-    # within ±1.4 of CBC's 60s answer. None searches to the time limit.
-    mip_gap: Optional[float] = Field(default=0.005, ge=0, le=0.1)
+    # Stop each solve once within this relative gap of the best possible plan. 0.01 (1%)
+    # cuts the 9-GW tapered-wildcard branch-and-bound tail in half while landing within
+    # ~1-2 pts over the horizon. None searches to the time limit.
+    mip_gap: Optional[float] = Field(default=0.01, ge=0, le=0.1)
     # Each of the next two removes a whole sequential round of solving, which on Cloud
     # Run is what a run's wall-clock is made of. Defaults keep the original pipeline.
     # How many top (FH, BB, TC) placements get a full BB/TC-aware re-solve. 0 takes the
@@ -535,6 +535,26 @@ def _player_name(players: pd.DataFrame, pid: int) -> str:
 # "stale enough that the alert is already ringing", not a second opinion on it.
 PREDICTIONS_TABLE_MAX_AGE_HOURS = 30
 
+# In-memory cache for raw player_predictions rows from Supabase. Without this,
+# every single optimize request pages ~10,300 rows across 11 sequential HTTP GETs
+# (5-20s of pure network wait before solving starts) for a table that only
+# changes once a day when the predictions cron runs.
+_predictions_cache: dict[str, Any] = {
+    "base_df": None,
+    "through_gw": None,
+    "newest_dt": None,
+    "fetched_at": 0.0,
+}
+PREDICTIONS_CACHE_MAX_AGE_SECONDS = 1800
+
+
+def _invalidate_predictions_cache() -> None:
+    """Clear the in-memory player_predictions cache (e.g. after cron writes)."""
+    _predictions_cache["base_df"] = None
+    _predictions_cache["through_gw"] = None
+    _predictions_cache["newest_dt"] = None
+    _predictions_cache["fetched_at"] = 0.0
+
 
 def _predictions_from_supabase(
     bootstrap: dict, gw_data: pd.DataFrame
@@ -561,49 +581,72 @@ def _predictions_from_supabase(
     if _supabase is None:
         return None, None
     try:
-        rows: list[dict] = []
-        page = 1000
-        offset = 0
-        while True:
-            resp = (
-                _supabase.table("player_predictions")
-                .select("player_id,event,predicted_points,generated_at,through_gw")
-                .range(offset, offset + page - 1)
-                .execute()
-            )
-            batch = resp.data or []
-            rows.extend(batch)
-            if len(batch) < page:
-                break
-            offset += page
-        if not rows:
-            logger.info("player_predictions table is empty — regenerating in-process")
-            return None, None
+        cache_age = time.time() - _predictions_cache["fetched_at"]
+        if (
+            _predictions_cache["base_df"] is not None
+            and _predictions_cache["newest_dt"] is not None
+            and cache_age < PREDICTIONS_CACHE_MAX_AGE_SECONDS
+        ):
+            age_hours = (datetime.now(timezone.utc) - _predictions_cache["newest_dt"]).total_seconds() / 3600
+            if age_hours > PREDICTIONS_TABLE_MAX_AGE_HOURS:
+                logger.warning(
+                    "cached player_predictions is %.1fh old (max %dh) — regenerating in-process",
+                    age_hours, PREDICTIONS_TABLE_MAX_AGE_HOURS,
+                )
+                return None, None
+            df = _predictions_cache["base_df"].copy()
+            through_gw = _predictions_cache["through_gw"]
+            from_cache = True
+        else:
+            rows: list[dict] = []
+            page = 1000
+            offset = 0
+            while True:
+                resp = (
+                    _supabase.table("player_predictions")
+                    .select("player_id,event,predicted_points,generated_at,through_gw")
+                    .range(offset, offset + page - 1)
+                    .execute()
+                )
+                batch = resp.data or []
+                rows.extend(batch)
+                if len(batch) < page:
+                    break
+                offset += page
+            if not rows:
+                logger.info("player_predictions table is empty — regenerating in-process")
+                return None, None
 
-        newest = max(r["generated_at"] for r in rows if r.get("generated_at"))
-        newest_dt = datetime.fromisoformat(newest.replace("Z", "+00:00"))
-        age_hours = (datetime.now(timezone.utc) - newest_dt).total_seconds() / 3600
-        if age_hours > PREDICTIONS_TABLE_MAX_AGE_HOURS:
-            logger.warning(
-                "player_predictions is %.1fh old (max %dh) — regenerating in-process",
-                age_hours, PREDICTIONS_TABLE_MAX_AGE_HOURS,
-            )
-            return None, None
+            newest = max(r["generated_at"] for r in rows if r.get("generated_at"))
+            newest_dt = datetime.fromisoformat(newest.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - newest_dt).total_seconds() / 3600
+            if age_hours > PREDICTIONS_TABLE_MAX_AGE_HOURS:
+                logger.warning(
+                    "player_predictions is %.1fh old (max %dh) — regenerating in-process",
+                    age_hours, PREDICTIONS_TABLE_MAX_AGE_HOURS,
+                )
+                return None, None
 
-        df = pd.DataFrame(rows).rename(columns={"player_id": "element"})
+            df = pd.DataFrame(rows).rename(columns={"player_id": "element"})
 
-        # Read the vintage off the newest run only. A purge failure can leave rows from an
-        # older run behind, and those carry an older through_gw — taking the max over
-        # everything would then claim a vintage no complete run actually produced.
-        through_gw = None
-        newest_rows = [r for r in rows if r.get("generated_at") == newest]
-        vintages = {r.get("through_gw") for r in newest_rows} - {None}
-        if vintages:
-            through_gw = int(min(vintages))
+            # Read the vintage off the newest run only. A purge failure can leave rows from an
+            # older run behind, and those carry an older through_gw — taking the max over
+            # everything would then claim a vintage no complete run actually produced.
+            through_gw = None
+            newest_rows = [r for r in rows if r.get("generated_at") == newest]
+            vintages = {r.get("through_gw") for r in newest_rows} - {None}
+            if vintages:
+                through_gw = int(min(vintages))
 
-        df = df[["element", "event", "predicted_points"]]
-        df["element"] = df["element"].astype(int)
-        df["event"] = df["event"].astype(int)
+            df = df[["element", "event", "predicted_points"]].copy()
+            df["element"] = df["element"].astype(int)
+            df["event"] = df["event"].astype(int)
+
+            _predictions_cache["base_df"] = df.copy()
+            _predictions_cache["through_gw"] = through_gw
+            _predictions_cache["newest_dt"] = newest_dt
+            _predictions_cache["fetched_at"] = time.time()
+            from_cache = False
 
         elements = bootstrap.get("elements", [])
         name_map = {int(e["id"]): f"{e.get('first_name', '')} {e.get('second_name', '')}".strip() for e in elements}
@@ -628,10 +671,16 @@ def _predictions_from_supabase(
         else:
             df["hist_games"] = 0
 
-        logger.info(
-            "Predictions from Supabase: %d rows, %d players, %.1fh old, through GW %s",
-            len(df), df["element"].nunique(), age_hours, through_gw,
-        )
+        if from_cache:
+            logger.info(
+                "Using cached player_predictions (%.0fs old): %d rows, %d players, %.1fh old, through GW %s",
+                cache_age, len(df), df["element"].nunique(), age_hours, through_gw,
+            )
+        else:
+            logger.info(
+                "Predictions from Supabase: %d rows, %d players, %.1fh old, through GW %s",
+                len(df), df["element"].nunique(), age_hours, through_gw,
+            )
         return df, through_gw
     except Exception:
         logger.exception("player_predictions read failed — regenerating in-process")
@@ -2214,6 +2263,7 @@ async def generate_predictions_cron(secret: str = Query(...)):
     # empty the table.
     stale_deleted = 0
     if written:
+        _invalidate_predictions_cache()
         try:
             deleted = (
                 _supabase.table("player_predictions")
