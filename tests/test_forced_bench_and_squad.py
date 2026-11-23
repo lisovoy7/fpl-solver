@@ -60,6 +60,8 @@ def _solver(
     forced_lineup=None,
     forced_bench=None,
     forced_squad=None,
+    forced_captain=None,
+    forced_vice_captain=None,
 ):
     solver = FPLSolver(
         planning_horizon=HORIZON,
@@ -70,6 +72,8 @@ def _solver(
         forced_lineup_players=forced_lineup,
         forced_bench_players=forced_bench,
         forced_squad_players=forced_squad,
+        forced_captain_players=forced_captain,
+        forced_vice_captain_players=forced_vice_captain,
     )
     solver.load_predictions(_predictions())
     solver.players = pd.DataFrame(
@@ -186,6 +190,59 @@ def test_free_hit_handles_forced_bench_and_forced_squad():
     assert DEFS[0] in fh["squad"]
     assert DEFS[0] not in fh["lineup"]
     assert UNOWNED_ENABLER in fh["squad"]
+
+
+def test_forced_captain_and_vice_captain():
+    # Without forcing, DEFS[0] (8.0 pts) is captain in START_GW
+    # Force MIDS[0] (4.0 pts) as captain and MIDS[1] (4.0 pts) as vice-captain in START_GW
+    solver = _solver(
+        forced_captain=[(MIDS[0], [START_GW])],
+        forced_vice_captain=[(MIDS[1], [START_GW])],
+    )
+    assert solver.solve(time_limit=30)
+    sol = solver.extract_solution()
+    assert MIDS[0] in _starters(sol, START_GW)
+    assert MIDS[1] in _starters(sol, START_GW)
+    assert sol["captains"][1] == MIDS[0]
+    assert sol["vice_captains"][1] == MIDS[1]
+    # In START_GW+1, not forced -> DEFS[0] is captain again
+    assert sol["captains"][2] == DEFS[0]
+
+
+def test_forced_captain_unowned_player_bought_started_and_captained():
+    solver = _solver(
+        forced_captain=[(UNOWNED_ENABLER, [START_GW])],
+        forced_vice_captain=[(DEFS[1], [START_GW])],
+    )
+    assert solver.solve(time_limit=30)
+    sol = solver.extract_solution()
+    assert UNOWNED_ENABLER in _owned(sol, START_GW)
+    assert UNOWNED_ENABLER in _starters(sol, START_GW)
+    assert sol["captains"][1] == UNOWNED_ENABLER
+    assert sol["vice_captains"][1] == DEFS[1]
+
+
+def test_free_hit_handles_forced_captain_and_vice_captain():
+    pred_df = _predictions().copy()
+    pred_df["name"] = pred_df["element"].map(lambda p: f"Player_{p}")
+    pred_df["position"] = pred_df["element"].map(POSITIONS)
+    pred_df["player_team_id"] = pred_df["element"].map(lambda p: (p % 10) + 1)
+    gw_data_df = pd.DataFrame({"element": POOL, "value": [50] * len(POOL)})
+
+    fh = calculate_optimal_free_hit_squad(
+        gw=START_GW,
+        budget=1000,
+        predictions_df=pred_df,
+        gw_data_df=gw_data_df,
+        watchlist_players=POOL,
+        forced_captain_players=[(UNOWNED_ENABLER, [START_GW])],
+        forced_vice_captain_players=[(MIDS[0], [START_GW])],
+    )
+    assert fh["status"] == "Optimal"
+    assert fh["captain"] == UNOWNED_ENABLER
+    assert fh["vice_captain"] == MIDS[0]
+    assert UNOWNED_ENABLER in fh["lineup"]
+    assert MIDS[0] in fh["lineup"]
 
 
 if __name__ == "__main__":
