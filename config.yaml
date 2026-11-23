@@ -164,6 +164,16 @@ forced_lineup: []
   # - player: 235     # Palmer
   #   gameweeks: [27]
 
+# Players forced onto the bench (in 15-man squad, not starting) in specific gameweeks.
+forced_bench: []
+  # - player: 12      # Saka
+  #   gameweeks: [13]
+
+# Players forced into the 15-man squad in specific gameweeks (solver decides start vs bench).
+forced_squad: []
+  # - player: 235     # Palmer
+  #   gameweeks: [27, 28]
+
 # Adjust predicted points for specific players (across all gameweeks).
 # multiplier > 1.0 = boost predictions, < 1.0 = reduce predictions.
 # Useful when you believe the model under/over-estimates a player.
