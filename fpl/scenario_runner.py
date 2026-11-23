@@ -85,6 +85,8 @@ def build_solver(scenario: Dict, ctx: Dict) -> Optional[FPLSolver]:
         forced_lineup_players=ctx["forced_lineup"],
         forced_bench_players=ctx.get("forced_bench"),
         forced_squad_players=ctx.get("forced_squad"),
+        forced_captain_players=ctx.get("forced_captain"),
+        forced_vice_captain_players=ctx.get("forced_vice_captain"),
         non_playing_players=ctx["non_playing"],
         banned_players=ctx.get("banned_players"),
         first_gw_transfer_penalty=ctx["first_gw_penalty"],

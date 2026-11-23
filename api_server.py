@@ -390,6 +390,19 @@ class ForcedSquadEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class ForcedCaptainEntry(BaseModel):
+    """One player who must be the captain (and in the starting XI) for a set of gameweeks."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
+class ForcedViceCaptainEntry(BaseModel):
+    """One player who must be the vice-captain (in the starting XI, not the captain)
+    for a set of gameweeks."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
 class PointsMultiplierEntry(BaseModel):
     """Scale one player's predicted points, every gameweek, by a constant.
 
@@ -443,6 +456,8 @@ class OptimizeRequest(BaseModel):
     forced_lineup: list[ForcedLineupEntry] = Field(default_factory=list)
     forced_bench: list[ForcedBenchEntry] = Field(default_factory=list)
     forced_squad: list[ForcedSquadEntry] = Field(default_factory=list)
+    forced_captain: list[ForcedCaptainEntry] = Field(default_factory=list)
+    forced_vice_captain: list[ForcedViceCaptainEntry] = Field(default_factory=list)
     # "Never own this player." A player NOT in the current squad is dropped from the
     # candidate pool. A player the manager DOES own stays in the pool but is banned
     # inside the model, which forces a sale at the first legal transfer — removing an
@@ -1174,6 +1189,7 @@ def _format_solution(
         transfers = solution["transfers"][t]
         chips = solution["chips"][t]
         captain_id = solution["captains"].get(t)
+        vice_captain_id = (solution.get("vice_captains") or {}).get(t)
         lineup_data = solution["lineups"].get(t, {})
         lineup_ids = lineup_data.get("starters", []) if lineup_data else []
         bench_ids = lineup_data.get("bench", []) if lineup_data else []
@@ -1226,13 +1242,17 @@ def _format_solution(
             fh_captain = next(
                 (p["element"] for p in fh_players if p.get("is_captain")), None
             )
+            fh_vice_captain = next(
+                (p["element"] for p in fh_players if p.get("is_vice_captain")), None
+            )
             captain_id = fh_captain if fh_captain is not None else captain_id
+            vice_captain_id = fh_vice_captain if fh_vice_captain is not None else vice_captain_id
             starters = [
                 {
                     **_player_info(bootstrap, p["element"]),
                     "expected_points": round(p.get("points", 0), 1),
                     "is_captain": bool(p.get("is_captain")),
-                    "is_vice_captain": False,
+                    "is_vice_captain": bool(p.get("is_vice_captain")),
                 }
                 for p in fh_players
                 if p.get("is_starter")
@@ -1253,7 +1273,7 @@ def _format_solution(
                     **_player_info(bootstrap, pid),
                     "expected_points": round(expected_points.get((pid, gw), 0), 1),
                     "is_captain": pid == captain_id,
-                    "is_vice_captain": False,
+                    "is_vice_captain": pid == vice_captain_id,
                 }
                 for pid in lineup_ids
             ]
@@ -1274,6 +1294,7 @@ def _format_solution(
             "starters": starters,
             "bench": bench,
             "captain": _player_info(bootstrap, captain_id) if captain_id else None,
+            "vice_captain": _player_info(bootstrap, vice_captain_id) if vice_captain_id else None,
             "expected_points": round(gw_pts, 1),
             "free_transfers_available": int(transfers.get("available_transfers", 0)),
             "paid_transfers": int(transfers.get("paid_transfers", 0)),
@@ -1642,6 +1663,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         + [e.player for e in req.forced_lineup]
         + [e.player for e in req.forced_bench]
         + [e.player for e in req.forced_squad]
+        + [e.player for e in req.forced_captain]
+        + [e.player for e in req.forced_vice_captain]
         + list(GW_POINT_OVERRIDES.keys())
     ))
     must_include = list(dict.fromkeys(
@@ -1784,6 +1807,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
     forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
     forced_bench_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_bench if e.gameweeks] or None
     forced_squad_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_squad if e.gameweeks] or None
+    forced_captain_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_captain if e.gameweeks] or None
+    forced_vice_captain_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_vice_captain if e.gameweeks] or None
     fh_watchlist = [p for p in watchlist if p not in set(banned_owned) and p not in set(ineligible_owned)]
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
@@ -1794,6 +1819,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             forced_lineup_players=forced_lineup_tuples,
             forced_bench_players=forced_bench_tuples,
             forced_squad_players=forced_squad_tuples,
+            forced_captain_players=forced_captain_tuples,
+            forced_vice_captain_players=forced_vice_captain_tuples,
             non_playing_players=non_playing_tuples,
         )
 
@@ -1852,6 +1879,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "forced_lineup": forced_lineup_tuples,
         "forced_bench": forced_bench_tuples,
         "forced_squad": forced_squad_tuples,
+        "forced_captain": forced_captain_tuples,
+        "forced_vice_captain": forced_vice_captain_tuples,
         "non_playing": non_playing_tuples,
         "banned_players": banned_owned,
         "no_transfer_gws": list(req.no_transfer_gws),

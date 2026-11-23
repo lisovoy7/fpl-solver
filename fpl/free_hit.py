@@ -340,6 +340,8 @@ def calculate_optimal_free_hit_squad(
     forced_lineup_players: Optional[List[Tuple[int, List[int]]]] = None,
     forced_bench_players: Optional[List[Tuple[int, List[int]]]] = None,
     forced_squad_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_captain_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_vice_captain_players: Optional[List[Tuple[int, List[int]]]] = None,
     points_multiplier_override: Optional[List[Tuple[int, float]]] = None,
     non_playing_players: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> Dict:
@@ -428,6 +430,24 @@ def calculate_optimal_free_hit_squad(
             if gw in gw_list and player_id in watchlist_players:
                 forced_squad_for_gw.append(player_id)
 
+    forced_captain_for_gw: Optional[int] = None
+    if forced_captain_players:
+        for player_id, gw_list in forced_captain_players:
+            if gw in gw_list and player_id in watchlist_players:
+                forced_captain_for_gw = player_id
+                break
+
+    forced_vice_captain_for_gw: Optional[int] = None
+    if forced_vice_captain_players:
+        for player_id, gw_list in forced_vice_captain_players:
+            if (
+                gw in gw_list
+                and player_id in watchlist_players
+                and player_id != forced_captain_for_gw
+            ):
+                forced_vice_captain_for_gw = player_id
+                break
+
     solution = _solve_free_hit_milp(
         gw_data,
         budget,
@@ -435,6 +455,8 @@ def calculate_optimal_free_hit_squad(
         gw,
         forced_bench_players=forced_bench_for_gw,
         forced_squad_players=forced_squad_for_gw,
+        forced_captain=forced_captain_for_gw,
+        forced_vice_captain=forced_vice_captain_for_gw,
     )
 
     if solution["status"] == "Optimal":
@@ -454,6 +476,8 @@ def _solve_free_hit_milp(
     gw: int,
     forced_bench_players: Optional[List[int]] = None,
     forced_squad_players: Optional[List[int]] = None,
+    forced_captain: Optional[int] = None,
+    forced_vice_captain: Optional[int] = None,
 ) -> Dict:
     """Solve the Free Hit MILP: maximize lineup points + captain bonus."""
     players = gw_data["element"].tolist()
@@ -510,9 +534,28 @@ def _solve_free_hit_milp(
         if p in players:
             prob += y[p] == 1
 
+    # Forced captain (must start and wear the armband)
+    if forced_captain is not None and forced_captain in players:
+        prob += y[forced_captain] == 1
+        prob += c[forced_captain] == 1
+
+    # Forced vice-captain (must start, not captain)
+    if (
+        forced_vice_captain is not None
+        and forced_vice_captain in players
+        and forced_vice_captain != forced_captain
+    ):
+        prob += y[forced_vice_captain] == 1
+        prob += c[forced_vice_captain] == 0
+
     # Forced bench (in 15-man squad, not in starting XI)
+    starter_forced = set(forced_players)
+    if forced_captain is not None:
+        starter_forced.add(forced_captain)
+    if forced_vice_captain is not None:
+        starter_forced.add(forced_vice_captain)
     for p in (forced_bench_players or []):
-        if p in players and p not in forced_players:
+        if p in players and p not in starter_forced:
             prob += x[p] == 1
             prob += y[p] == 0
 
@@ -527,6 +570,19 @@ def _solve_free_hit_milp(
         squad = [p for p in players if x[p].varValue > 0.5]
         lineup = [p for p in players if y[p].varValue > 0.5]
         captain = next(p for p in players if c[p].varValue > 0.5)
+        if (
+            forced_vice_captain is not None
+            and forced_vice_captain in lineup
+            and forced_vice_captain != captain
+        ):
+            vice_captain = forced_vice_captain
+        else:
+            other_starters = [p for p in lineup if p != captain]
+            vice_captain = (
+                max(other_starters, key=lambda p: points.get(p, 0.0))
+                if other_starters
+                else None
+            )
         total_points = pulp.value(prob.objective)
         squad_cost = sum(costs[p] for p in squad)
 
@@ -541,6 +597,7 @@ def _solve_free_hit_milp(
                     "points": points.get(p, 0),
                     "is_starter": p in lineup,
                     "is_captain": p == captain,
+                    "is_vice_captain": p == vice_captain,
                 }
                 for p in pos_players
             ]
@@ -550,6 +607,7 @@ def _solve_free_hit_milp(
             "squad": squad,
             "lineup": lineup,
             "captain": captain,
+            "vice_captain": vice_captain,
             "total_points": total_points,
             "squad_cost": squad_cost,
             "unused_budget": budget - squad_cost,
@@ -578,6 +636,8 @@ def calculate_free_hit_benefits_for_horizon(
     forced_lineup_players: Optional[List[Tuple[int, List[int]]]] = None,
     forced_bench_players: Optional[List[Tuple[int, List[int]]]] = None,
     forced_squad_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_captain_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_vice_captain_players: Optional[List[Tuple[int, List[int]]]] = None,
     points_multiplier_override: Optional[List[Tuple[int, float]]] = None,
     non_playing_players: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> Dict[int, Dict]:
@@ -606,6 +666,8 @@ def calculate_free_hit_benefits_for_horizon(
                 forced_lineup_players=forced_lineup_players,
                 forced_bench_players=forced_bench_players,
                 forced_squad_players=forced_squad_players,
+                forced_captain_players=forced_captain_players,
+                forced_vice_captain_players=forced_vice_captain_players,
                 points_multiplier_override=points_multiplier_override,
                 non_playing_players=non_playing_players,
             )

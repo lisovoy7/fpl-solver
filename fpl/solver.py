@@ -80,6 +80,8 @@ class FPLSolver:
         forced_lineup_players: Optional[List[tuple]] = None,
         forced_bench_players: Optional[List[tuple]] = None,
         forced_squad_players: Optional[List[tuple]] = None,
+        forced_captain_players: Optional[List[tuple]] = None,
+        forced_vice_captain_players: Optional[List[tuple]] = None,
         non_playing_players: Optional[List[tuple]] = None,
         banned_players: Optional[List[int]] = None,
         free_hit_gws: Optional[List[int]] = None,
@@ -108,6 +110,8 @@ class FPLSolver:
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
             forced_bench_players: List of (player_id, [gw_list]) for players forced onto the bench (in 15-man squad, not in starting XI).
             forced_squad_players: List of (player_id, [gw_list]) for players forced into the 15-man squad (solver decides start vs bench).
+            forced_captain_players: List of (player_id, [gw_list]) for forced captains (must start and wear the armband).
+            forced_vice_captain_players: List of (player_id, [gw_list]) for forced vice-captains (must start and not be captain).
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
             banned_players: Player IDs the plan must not own. A banned player the
                 manager already holds is sold at the first gameweek transfers are
@@ -144,6 +148,8 @@ class FPLSolver:
         self.forced_lineup_players = forced_lineup_players or []
         self.forced_bench_players = forced_bench_players or []
         self.forced_squad_players = forced_squad_players or []
+        self.forced_captain_players = forced_captain_players or []
+        self.forced_vice_captain_players = forced_vice_captain_players or []
         self.non_playing_players = non_playing_players or []
         self.banned_players = banned_players or []
         self.free_hit_gws = free_hit_gws or []
@@ -918,10 +924,12 @@ class FPLSolver:
         logger.debug("Lineup constraints added")
 
     def add_advanced_constraints(self) -> None:
-        """Add advanced constraints (forced lineup/bench/squad, non-playing, BGW)."""
+        """Add advanced constraints (forced lineup/bench/squad/captain/vice-captain, non-playing, BGW)."""
         logger.debug("Adding advanced constraints")
         self._add_banned_player_constraints()
         self._add_forced_lineup_constraints()
+        self._add_forced_captain_constraints()
+        self._add_forced_vice_captain_constraints()
         self._add_forced_bench_constraints()
         self._add_forced_squad_constraints()
         self._add_non_playing_player_constraints()
@@ -1050,6 +1058,164 @@ class FPLSolver:
                     player_id, player_name, out_of_range_gws,
                 )
 
+    def _add_forced_captain_constraints(self) -> None:
+        """Add constraints to force specific players to be captain (and start).
+
+        Free Hit GWs are skipped because captain selection is handled
+        by the FH sub-problem independently.
+        """
+        if not self.forced_captain_players:
+            return
+
+        logger.debug("Adding forced captain constraints")
+
+        fh_gw_set = set(self.free_hit_gws)
+        banned = set(self.banned_players)
+        captain_assigned_gw = set()
+
+        for player_id, forced_gws in self.forced_captain_players:
+            if player_id in banned:
+                logger.warning(
+                    "Player %d is both banned and forced to be captain — exclusion wins, "
+                    "dropping the forced captain",
+                    player_id,
+                )
+                continue
+            player_name = "Unknown"
+            if self.players is not None:
+                player_data = self.players[self.players['element'] == player_id]
+                if len(player_data) > 0:
+                    player_name = player_data.iloc[0]['name']
+                else:
+                    logger.warning("Player %d not found in watchlist - skipping forced captain", player_id)
+                    continue
+
+            out_of_range_gws = []
+            for gw in forced_gws:
+                if gw in fh_gw_set:
+                    logger.debug("  Player %d (%s) forced captain skipped for FH GW %d", player_id, player_name, gw)
+                    continue
+                internal_gw = gw - self.start_gw + 1
+                if 1 <= internal_gw <= self.T:
+                    if (player_id, internal_gw) not in self.variables['c']:
+                        logger.warning("Player %d not in optimization model - cannot force captain for GW %d", player_id, gw)
+                        continue
+                    if gw in captain_assigned_gw:
+                        logger.warning(
+                            "GW %d already has a forced captain — ignoring second forced captain %d (%s)",
+                            gw, player_id, player_name,
+                        )
+                        continue
+                    if self.club_gameweeks is not None:
+                        club = self._club_of(player_id)
+                        if club is not None and gw not in self.club_gameweeks.get(club, set()):
+                            logger.warning(
+                                "Player %d (%s) forced as captain in GW %d but his club has no "
+                                "fixture then - ignoring that gameweek",
+                                player_id, player_name, gw,
+                            )
+                            continue
+                    # c == 1 also forces y == 1 via Captain_Starter_{p}_{t} (c <= y).
+                    self.prob += (
+                        self.variables['c'][(player_id, internal_gw)] == 1,
+                        f"Forced_Captain_{player_id}_GW{gw}",
+                    )
+                    captain_assigned_gw.add(gw)
+                    logger.debug("  Player %d (%s) forced as captain in GW %d", player_id, player_name, gw)
+                else:
+                    out_of_range_gws.append(gw)
+
+            if out_of_range_gws:
+                logger.debug(
+                    "  Player %d (%s) forced captain outside planning horizon for GWs %s",
+                    player_id, player_name, out_of_range_gws,
+                )
+
+    def _add_forced_vice_captain_constraints(self) -> None:
+        """Add constraints to force specific players to be vice-captain (must start, not captain).
+
+        Vice-captain has no direct points multiplier in the MILP objective, so pinning
+        a vice-captain requires the player to start (`y == 1`) and not be captain (`c == 0`),
+        and records the choice so `extract_solution` and `_format_solution` mark them.
+        Free Hit GWs are skipped because the FH sub-problem handles them independently.
+        """
+        if not self.forced_vice_captain_players:
+            return
+
+        logger.debug("Adding forced vice-captain constraints")
+
+        fh_gw_set = set(self.free_hit_gws)
+        banned = set(self.banned_players)
+        forced_captain_pairs = {
+            (pid, gw)
+            for pid, gws in self.forced_captain_players
+            for gw in gws
+        }
+
+        for player_id, forced_gws in self.forced_vice_captain_players:
+            if player_id in banned:
+                logger.warning(
+                    "Player %d is both banned and forced to be vice-captain — exclusion wins, "
+                    "dropping the forced vice-captain",
+                    player_id,
+                )
+                continue
+            player_name = "Unknown"
+            if self.players is not None:
+                player_data = self.players[self.players['element'] == player_id]
+                if len(player_data) > 0:
+                    player_name = player_data.iloc[0]['name']
+                else:
+                    logger.warning("Player %d not found in watchlist - skipping forced vice-captain", player_id)
+                    continue
+
+            out_of_range_gws = []
+            for gw in forced_gws:
+                if gw in fh_gw_set:
+                    logger.debug("  Player %d (%s) forced vice-captain skipped for FH GW %d", player_id, player_name, gw)
+                    continue
+                if (player_id, gw) in forced_captain_pairs:
+                    logger.warning(
+                        "Player %d (%s) is forced as both captain and vice-captain in GW %d "
+                        "— forced captain wins, ignoring forced vice-captain",
+                        player_id, player_name, gw,
+                    )
+                    continue
+                internal_gw = gw - self.start_gw + 1
+                if 1 <= internal_gw <= self.T:
+                    if (
+                        (player_id, internal_gw) not in self.variables['y']
+                        or (player_id, internal_gw) not in self.variables['c']
+                    ):
+                        logger.warning("Player %d not in optimization model - cannot force vice-captain for GW %d", player_id, gw)
+                        continue
+                    if self.club_gameweeks is not None:
+                        club = self._club_of(player_id)
+                        if club is not None and gw not in self.club_gameweeks.get(club, set()):
+                            logger.warning(
+                                "Player %d (%s) forced as vice-captain in GW %d but his club has no "
+                                "fixture then - ignoring that gameweek",
+                                player_id, player_name, gw,
+                            )
+                            continue
+                    self.prob += (
+                        self.variables['y'][(player_id, internal_gw)] == 1,
+                        f"Forced_ViceCaptain_Start_{player_id}_GW{gw}",
+                    )
+                    self.prob += (
+                        self.variables['c'][(player_id, internal_gw)] == 0,
+                        f"Forced_ViceCaptain_NotCaptain_{player_id}_GW{gw}",
+                    )
+                    logger.debug("  Player %d (%s) forced as vice-captain in GW %d", player_id, player_name, gw)
+                else:
+                    out_of_range_gws.append(gw)
+
+            if out_of_range_gws:
+                logger.debug(
+                    "  Player %d (%s) forced vice-captain outside planning horizon for GWs %s",
+                    player_id, player_name, out_of_range_gws,
+                )
+
     def _add_forced_bench_constraints(self) -> None:
         """Add constraints to force specific players onto the bench (in squad, not starting).
 
@@ -1065,7 +1231,11 @@ class FPLSolver:
         banned = set(self.banned_players)
         forced_lineup_pairs = {
             (pid, gw)
-            for pid, gws in self.forced_lineup_players
+            for pid, gws in (
+                list(self.forced_lineup_players)
+                + list(self.forced_captain_players)
+                + list(self.forced_vice_captain_players)
+            )
             for gw in gws
         }
 
@@ -1640,6 +1810,7 @@ class FPLSolver:
             'squads': {},
             'lineups': {},
             'captains': {},
+            'vice_captains': {},
             'transfers': {},
             'bank': {},
             'chips': {},
@@ -1658,10 +1829,31 @@ class FPLSolver:
             bench = [p for p in squad if p not in starters]
             solution['lineups'][t] = {'starters': starters, 'bench': bench}
 
+        forced_vc_by_gw = {}
+        for pid, gws in self.forced_vice_captain_players:
+            for gw in gws:
+                if gw not in forced_vc_by_gw:
+                    forced_vc_by_gw[gw] = pid
+
         for t in gameweeks:
             captain = [p for p in players if _on(self.variables['c'][(p, t)])]
             if captain:
                 solution['captains'][t] = captain[0]
+            actual_gw = self.start_gw + t - 1
+            forced_vc = forced_vc_by_gw.get(actual_gw)
+            starters = solution['lineups'][t]['starters']
+            cap_id = solution['captains'].get(t)
+            if forced_vc is not None and forced_vc in starters and forced_vc != cap_id:
+                solution['vice_captains'][t] = forced_vc
+            else:
+                other_starters = [p for p in starters if p != cap_id]
+                if other_starters and hasattr(self, 'expected_points') and self.expected_points:
+                    solution['vice_captains'][t] = max(
+                        other_starters,
+                        key=lambda p: self.expected_points.get((p, actual_gw), 0.0),
+                    )
+                elif other_starters:
+                    solution['vice_captains'][t] = other_starters[0]
 
         # Replay the free-transfer ledger, spending free transfers before taking hits.
         #
