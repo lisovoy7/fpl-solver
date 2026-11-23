@@ -114,9 +114,9 @@ def _apply_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     if "chips" not in config:
         config["chips"] = {}
 
-    for key in ("non_playing", "forced_lineup", "points_multiplier",
-                "excluded_players", "extra_players", "fixture_overrides",
-                "no_transfer_gws", "rolled_transfers"):
+    for key in ("non_playing", "forced_lineup", "forced_bench", "forced_squad",
+                "points_multiplier", "excluded_players", "extra_players",
+                "fixture_overrides", "no_transfer_gws", "rolled_transfers"):
         if key not in config:
             config[key] = []
 
@@ -206,6 +206,8 @@ def get_player_overrides(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "non_playing": to_non_playing_tuples(config.get("non_playing") or []),
         "forced_lineup": to_non_playing_tuples(config.get("forced_lineup") or []),
+        "forced_bench": to_non_playing_tuples(config.get("forced_bench") or []),
+        "forced_squad": to_non_playing_tuples(config.get("forced_squad") or []),
         "points_multiplier": to_points_multiplier_tuples(config.get("points_multiplier") or []),
         "excluded_players": [int(p) for p in (config.get("excluded_players") or [])],
         "extra_players": [int(p) for p in (config.get("extra_players") or [])],

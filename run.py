@@ -494,6 +494,8 @@ def main() -> None:
     explicit_include = list(dict.fromkeys(
         list(overrides.get("extra_players", []))
         + [pid for pid, _ in overrides.get("forced_lineup", [])]
+        + [pid for pid, _ in overrides.get("forced_bench", [])]
+        + [pid for pid, _ in overrides.get("forced_squad", [])]
     ))
     must_include = list(dict.fromkeys(list(current_squad) + explicit_include))
     # Owned exclusions stay in the pool and are banned inside the model instead —
@@ -630,6 +632,8 @@ def main() -> None:
             predictions_df=predictions, gw_data_df=gw_data,
             watchlist_players=[p for p in watchlist if p not in set(banned_owned) and p not in set(ineligible_owned)],
             forced_lineup_players=overrides.get("forced_lineup"),
+            forced_bench_players=overrides.get("forced_bench"),
+            forced_squad_players=overrides.get("forced_squad"),
             points_multiplier_override=overrides.get("points_multiplier"),
             non_playing_players=overrides.get("non_playing"),
         )
@@ -652,6 +656,8 @@ def main() -> None:
         "start_gw": current_gw,
         "points_multiplier": overrides.get("points_multiplier"),
         "forced_lineup": overrides.get("forced_lineup"),
+        "forced_bench": overrides.get("forced_bench"),
+        "forced_squad": overrides.get("forced_squad"),
         "non_playing": overrides.get("non_playing"),
         "banned_players": banned_owned,
         "no_transfer_gws": overrides.get("no_transfer_gws"),

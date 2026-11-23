@@ -376,6 +376,20 @@ class ForcedLineupEntry(BaseModel):
     gameweeks: list[int] = Field(default_factory=list)
 
 
+class ForcedBenchEntry(BaseModel):
+    """One player who must be on the bench (in the 15-man squad, not in the starting XI)
+    for a set of gameweeks."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
+class ForcedSquadEntry(BaseModel):
+    """One player who must be in the 15-man squad for a set of gameweeks, while letting
+    the solver decide whether to start or bench them."""
+    player: int
+    gameweeks: list[int] = Field(default_factory=list)
+
+
 class PointsMultiplierEntry(BaseModel):
     """Scale one player's predicted points, every gameweek, by a constant.
 
@@ -427,6 +441,8 @@ class OptimizeRequest(BaseModel):
     # near-certain infeasibility and never what "start Palmer in GW27" meant. The solver
     # itself always took (player, [gws]) tuples; only this layer flattened them away.
     forced_lineup: list[ForcedLineupEntry] = Field(default_factory=list)
+    forced_bench: list[ForcedBenchEntry] = Field(default_factory=list)
+    forced_squad: list[ForcedSquadEntry] = Field(default_factory=list)
     # "Never own this player." A player NOT in the current squad is dropped from the
     # candidate pool. A player the manager DOES own stays in the pool but is banned
     # inside the model, which forces a sale at the first legal transfer — removing an
@@ -1624,6 +1640,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         list(req.extra_players)
         + list(eligibility.get("extra_players", []))
         + [e.player for e in req.forced_lineup]
+        + [e.player for e in req.forced_bench]
+        + [e.player for e in req.forced_squad]
         + list(GW_POINT_OVERRIDES.keys())
     ))
     must_include = list(dict.fromkeys(
@@ -1764,6 +1782,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         chip_scenarios = chip_scenarios[:req.max_scenarios]
 
     forced_lineup_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_lineup if e.gameweeks] or None
+    forced_bench_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_bench if e.gameweeks] or None
+    forced_squad_tuples = [(e.player, list(e.gameweeks)) for e in req.forced_squad if e.gameweeks] or None
     fh_watchlist = [p for p in watchlist if p not in set(banned_owned) and p not in set(ineligible_owned)]
     fh_benefits: dict = {}
     if any(s["free_hit_gws"] for s in chip_scenarios):
@@ -1772,6 +1792,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             predictions_df=predictions, gw_data_df=gw_data,
             watchlist_players=fh_watchlist,
             forced_lineup_players=forced_lineup_tuples,
+            forced_bench_players=forced_bench_tuples,
+            forced_squad_players=forced_squad_tuples,
             non_playing_players=non_playing_tuples,
         )
 
@@ -1828,6 +1850,8 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         # list again would square every multiplier.
         "points_multiplier": None,
         "forced_lineup": forced_lineup_tuples,
+        "forced_bench": forced_bench_tuples,
+        "forced_squad": forced_squad_tuples,
         "non_playing": non_playing_tuples,
         "banned_players": banned_owned,
         "no_transfer_gws": list(req.no_transfer_gws),

@@ -78,6 +78,8 @@ class FPLSolver:
         solver_name: str = 'CBC',
         points_multiplier_override: Optional[List[tuple]] = None,
         forced_lineup_players: Optional[List[tuple]] = None,
+        forced_bench_players: Optional[List[tuple]] = None,
+        forced_squad_players: Optional[List[tuple]] = None,
         non_playing_players: Optional[List[tuple]] = None,
         banned_players: Optional[List[int]] = None,
         free_hit_gws: Optional[List[int]] = None,
@@ -104,6 +106,8 @@ class FPLSolver:
             solver_name: MILP solver to use ('CBC', 'HIGHS', 'GUROBI').
             points_multiplier_override: List of (player_id, multiplier) tuples.
             forced_lineup_players: List of (player_id, [gw_list]) for forced starters.
+            forced_bench_players: List of (player_id, [gw_list]) for players forced onto the bench (in 15-man squad, not in starting XI).
+            forced_squad_players: List of (player_id, [gw_list]) for players forced into the 15-man squad (solver decides start vs bench).
             non_playing_players: List of (player_id, [gw_list]) for 0-point overrides.
             banned_players: Player IDs the plan must not own. A banned player the
                 manager already holds is sold at the first gameweek transfers are
@@ -138,6 +142,8 @@ class FPLSolver:
         self.solver_name = solver_name
         self.points_multiplier_override = points_multiplier_override or []
         self.forced_lineup_players = forced_lineup_players or []
+        self.forced_bench_players = forced_bench_players or []
+        self.forced_squad_players = forced_squad_players or []
         self.non_playing_players = non_playing_players or []
         self.banned_players = banned_players or []
         self.free_hit_gws = free_hit_gws or []
@@ -912,10 +918,12 @@ class FPLSolver:
         logger.debug("Lineup constraints added")
 
     def add_advanced_constraints(self) -> None:
-        """Add advanced constraints (forced lineup, non-playing, BGW)."""
+        """Add advanced constraints (forced lineup/bench/squad, non-playing, BGW)."""
         logger.debug("Adding advanced constraints")
         self._add_banned_player_constraints()
         self._add_forced_lineup_constraints()
+        self._add_forced_bench_constraints()
+        self._add_forced_squad_constraints()
         self._add_non_playing_player_constraints()
         self._add_bgw_constraints()
         logger.debug("Advanced constraints added")
@@ -1039,6 +1047,153 @@ class FPLSolver:
                 # _add_non_playing_player_constraints for why that matters here.
                 logger.debug(
                     "  Player %d (%s) forced lineup outside planning horizon for GWs %s",
+                    player_id, player_name, out_of_range_gws,
+                )
+
+    def _add_forced_bench_constraints(self) -> None:
+        """Add constraints to force specific players onto the bench (in squad, not starting).
+
+        Free Hit GWs are skipped because squad/lineup selection is handled
+        by the FH sub-problem independently.
+        """
+        if not self.forced_bench_players:
+            return
+
+        logger.debug("Adding forced bench constraints")
+
+        fh_gw_set = set(self.free_hit_gws)
+        banned = set(self.banned_players)
+        forced_lineup_pairs = {
+            (pid, gw)
+            for pid, gws in self.forced_lineup_players
+            for gw in gws
+        }
+
+        for player_id, forced_gws in self.forced_bench_players:
+            if player_id in banned:
+                logger.warning(
+                    "Player %d is both banned and forced onto the bench — exclusion wins, "
+                    "dropping the forced bench",
+                    player_id,
+                )
+                continue
+            player_name = "Unknown"
+            if self.players is not None:
+                player_data = self.players[self.players['element'] == player_id]
+                if len(player_data) > 0:
+                    player_name = player_data.iloc[0]['name']
+                else:
+                    logger.warning("Player %d not found in watchlist - skipping forced bench", player_id)
+                    continue
+
+            out_of_range_gws = []
+            for gw in forced_gws:
+                if gw in fh_gw_set:
+                    logger.debug("  Player %d (%s) forced bench skipped for FH GW %d", player_id, player_name, gw)
+                    continue
+                internal_gw = gw - self.start_gw + 1
+                if 1 <= internal_gw <= self.T:
+                    if (
+                        (player_id, internal_gw) not in self.variables['x']
+                        or (player_id, internal_gw) not in self.variables['y']
+                    ):
+                        logger.warning("Player %d not in optimization model - cannot force bench for GW %d", player_id, gw)
+                        continue
+                    if (player_id, gw) in forced_lineup_pairs:
+                        # If the player's club actually has a fixture in `gw`, forced_lineup
+                        # already pinned y == 1, so also pinning y == 0 would make the model
+                        # infeasible. Let forced_lineup win with a warning.
+                        is_bgw = False
+                        if self.club_gameweeks is not None:
+                            club = self._club_of(player_id)
+                            if club is not None and gw not in self.club_gameweeks.get(club, set()):
+                                is_bgw = True
+                        if not is_bgw:
+                            logger.warning(
+                                "Player %d (%s) is forced to both start and sit on the bench in GW %d "
+                                "— forced lineup wins, ignoring forced bench",
+                                player_id, player_name, gw,
+                            )
+                            continue
+                    self.prob += (
+                        self.variables['x'][(player_id, internal_gw)] == 1,
+                        f"Forced_Bench_Squad_{player_id}_GW{gw}",
+                    )
+                    self.prob += (
+                        self.variables['y'][(player_id, internal_gw)] == 0,
+                        f"Forced_Bench_Lineup_{player_id}_GW{gw}",
+                    )
+                    logger.debug("  Player %d (%s) forced onto bench in GW %d", player_id, player_name, gw)
+                else:
+                    out_of_range_gws.append(gw)
+
+            if out_of_range_gws:
+                logger.debug(
+                    "  Player %d (%s) forced bench outside planning horizon for GWs %s",
+                    player_id, player_name, out_of_range_gws,
+                )
+
+    def _add_forced_squad_constraints(self) -> None:
+        """Add constraints to force specific players into the 15-man squad (solver picks start vs bench).
+
+        Free Hit GWs are skipped because squad selection is handled
+        by the FH sub-problem independently.
+        """
+        if not self.forced_squad_players:
+            return
+
+        logger.debug("Adding forced squad constraints")
+
+        fh_gw_set = set(self.free_hit_gws)
+        banned = set(self.banned_players)
+        forced_bench_pairs = {
+            (pid, gw)
+            for pid, gws in self.forced_bench_players
+            for gw in gws
+        }
+
+        for player_id, forced_gws in self.forced_squad_players:
+            if player_id in banned:
+                logger.warning(
+                    "Player %d is both banned and forced into the squad — exclusion wins, "
+                    "dropping the forced squad",
+                    player_id,
+                )
+                continue
+            player_name = "Unknown"
+            if self.players is not None:
+                player_data = self.players[self.players['element'] == player_id]
+                if len(player_data) > 0:
+                    player_name = player_data.iloc[0]['name']
+                else:
+                    logger.warning("Player %d not found in watchlist - skipping forced squad", player_id)
+                    continue
+
+            out_of_range_gws = []
+            for gw in forced_gws:
+                if gw in fh_gw_set:
+                    logger.debug("  Player %d (%s) forced squad skipped for FH GW %d", player_id, player_name, gw)
+                    continue
+                if (player_id, gw) in forced_bench_pairs:
+                    # _add_forced_bench_constraints (or forced_lineup if both were passed)
+                    # already enforces x == 1 for this player and GW.
+                    continue
+                internal_gw = gw - self.start_gw + 1
+                if 1 <= internal_gw <= self.T:
+                    if (player_id, internal_gw) not in self.variables['x']:
+                        logger.warning("Player %d not in optimization model - cannot force squad for GW %d", player_id, gw)
+                        continue
+                    self.prob += (
+                        self.variables['x'][(player_id, internal_gw)] == 1,
+                        f"Forced_Squad_{player_id}_GW{gw}",
+                    )
+                    logger.debug("  Player %d (%s) forced into squad in GW %d", player_id, player_name, gw)
+                else:
+                    out_of_range_gws.append(gw)
+
+            if out_of_range_gws:
+                logger.debug(
+                    "  Player %d (%s) forced squad outside planning horizon for GWs %s",
                     player_id, player_name, out_of_range_gws,
                 )
 
