@@ -338,6 +338,8 @@ def calculate_optimal_free_hit_squad(
     gw_data_df: pd.DataFrame,
     watchlist_players: List[int],
     forced_lineup_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_bench_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_squad_players: Optional[List[Tuple[int, List[int]]]] = None,
     points_multiplier_override: Optional[List[Tuple[int, float]]] = None,
     non_playing_players: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> Dict:
@@ -414,7 +416,26 @@ def calculate_optimal_free_hit_squad(
             if gw in gw_list and player_id in watchlist_players:
                 forced_players.append(player_id)
 
-    solution = _solve_free_hit_milp(gw_data, budget, forced_players, gw)
+    forced_bench_for_gw: List[int] = []
+    if forced_bench_players:
+        for player_id, gw_list in forced_bench_players:
+            if gw in gw_list and player_id in watchlist_players and player_id not in forced_players:
+                forced_bench_for_gw.append(player_id)
+
+    forced_squad_for_gw: List[int] = []
+    if forced_squad_players:
+        for player_id, gw_list in forced_squad_players:
+            if gw in gw_list and player_id in watchlist_players:
+                forced_squad_for_gw.append(player_id)
+
+    solution = _solve_free_hit_milp(
+        gw_data,
+        budget,
+        forced_players,
+        gw,
+        forced_bench_players=forced_bench_for_gw,
+        forced_squad_players=forced_squad_for_gw,
+    )
 
     if solution["status"] == "Optimal":
         logger.debug(
@@ -431,6 +452,8 @@ def _solve_free_hit_milp(
     budget: float,
     forced_players: List[int],
     gw: int,
+    forced_bench_players: Optional[List[int]] = None,
+    forced_squad_players: Optional[List[int]] = None,
 ) -> Dict:
     """Solve the Free Hit MILP: maximize lineup points + captain bonus."""
     players = gw_data["element"].tolist()
@@ -487,6 +510,17 @@ def _solve_free_hit_milp(
         if p in players:
             prob += y[p] == 1
 
+    # Forced bench (in 15-man squad, not in starting XI)
+    for p in (forced_bench_players or []):
+        if p in players and p not in forced_players:
+            prob += x[p] == 1
+            prob += y[p] == 0
+
+    # Forced squad (in 15-man squad; solver picks starter vs bench)
+    for p in (forced_squad_players or []):
+        if p in players:
+            prob += x[p] == 1
+
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
     if prob.status == pulp.LpStatusOptimal:
@@ -542,6 +576,8 @@ def calculate_free_hit_benefits_for_horizon(
     gw_data_df: pd.DataFrame,
     watchlist_players: List[int],
     forced_lineup_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_bench_players: Optional[List[Tuple[int, List[int]]]] = None,
+    forced_squad_players: Optional[List[Tuple[int, List[int]]]] = None,
     points_multiplier_override: Optional[List[Tuple[int, float]]] = None,
     non_playing_players: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> Dict[int, Dict]:
@@ -568,6 +604,8 @@ def calculate_free_hit_benefits_for_horizon(
                 gw_data_df=gw_data_df,
                 watchlist_players=watchlist_players,
                 forced_lineup_players=forced_lineup_players,
+                forced_bench_players=forced_bench_players,
+                forced_squad_players=forced_squad_players,
                 points_multiplier_override=points_multiplier_override,
                 non_playing_players=non_playing_players,
             )
