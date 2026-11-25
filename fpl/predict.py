@@ -88,6 +88,22 @@ BONUS_SHRINK_K = 10.0
 # construction, and nobody can exceed it.
 TEAM_XGC_LAST_N = LAST_N_GAMES
 
+# Recent actual-points blend: 80% component model + 20% recent form.
+#
+# Component predictions capture underlying process (normalised xG, xA, team xGC,
+# defensive contributions, shrunk bonus), while actual FPL points over the last
+# 3 appearances of MIN_MINUTES+ (55+ min) capture recent form. To keep a single
+# haul, red card, or 1-2 game cameo from dominating:
+#   - Each qualifying game's total_points is clamped to [1, 10].
+#   - Players with fewer than 3 qualifying appearances have their missing games
+#     padded with 2 points (1 game -> add two 2s; 2 games -> add one 2) so the
+#     recent-form average is always divided by 3.
+RECENT_FORM_WEIGHT = 0.20
+RECENT_FORM_GAMES = 3
+RECENT_FORM_MIN_PTS = 1.0
+RECENT_FORM_MAX_PTS = 10.0
+RECENT_FORM_PAD_PTS = 2.0
+
 GOAL_POINTS = {"GK": 10, "DEF": 6, "MID": 5, "FWD": 4}
 
 NORMALIZABLE_COMPONENTS = [
@@ -296,6 +312,28 @@ def _positional_priors(
     return priors
 
 
+def _recent_form_average(
+    total_points: Sequence[float],
+    n_games: int = RECENT_FORM_GAMES,
+    min_pts: float = RECENT_FORM_MIN_PTS,
+    max_pts: float = RECENT_FORM_MAX_PTS,
+    pad_pts: float = RECENT_FORM_PAD_PTS,
+) -> float:
+    """
+    Average of the last up to `n_games` qualifying appearances' actual points,
+    clamped to [min_pts, max_pts] per game and padded with `pad_pts` when a
+    player has fewer than `n_games` qualifying appearances.
+    """
+    if n_games <= 0:
+        return 0.0
+    arr = np.asarray(list(total_points)[-n_games:], dtype=float)
+    if len(arr) == 0:
+        return float(pad_pts)
+    capped = np.clip(arr, min_pts, max_pts)
+    missing = max(0, n_games - len(capped))
+    return float((capped.sum() + missing * pad_pts) / n_games)
+
+
 def _calculate_player_averages(
     normalized_stats: pd.DataFrame,
     gw_data: pd.DataFrame,
@@ -326,12 +364,19 @@ def _calculate_player_averages(
 
     gw_filtered = gw_data[gw_data["minutes"] >= MIN_MINUTES].copy()
     gw_filtered["kickoff_time"] = pd.to_datetime(gw_filtered["kickoff_time"])
-    for col in ["defensive_contribution", "bonus", "yellow_cards"]:
+    has_total_points = "total_points" in gw_filtered.columns
+    for col in ["defensive_contribution", "bonus", "yellow_cards", "total_points"]:
         if col in gw_filtered.columns:
             gw_filtered[col] = pd.to_numeric(gw_filtered[col], errors="coerce").fillna(0)
     stats_sorted = normalized_stats.sort_values(["element", "kickoff_time"])
     priors = _positional_priors(stats_sorted, SHRUNK_COMPONENTS)
     bonus_priors = _positional_priors(gw_filtered, ("bonus",)).get("bonus", {})
+
+    sort_cols = (
+        ["kickoff_time", "fixture"]
+        if "fixture" in gw_filtered.columns
+        else ["kickoff_time"]
+    )
 
     records = []
     for element, group in stats_sorted.groupby("element"):
@@ -340,7 +385,7 @@ def _calculate_player_averages(
 
         player_gw = gw_filtered[gw_filtered["element"] == element]
         if len(player_gw) > 0:
-            gw_sorted = player_gw.sort_values("kickoff_time")
+            gw_sorted = player_gw.sort_values(sort_cols)
             recent_gw = gw_sorted.tail(last_n_games)
             avg_def = recent_gw["defensive_contribution"].mean()
             def_history = recent_gw["defensive_contribution"].tolist()
@@ -350,11 +395,19 @@ def _calculate_player_averages(
                 else 0.0
             )
             bonus_games = len(recent_gw) if "bonus" in recent_gw.columns else 0
+            avg_recent_pts = (
+                _recent_form_average(
+                    gw_sorted["total_points"].tail(RECENT_FORM_GAMES).tolist()
+                )
+                if has_total_points
+                else np.nan
+            )
         else:
             avg_def = 0.0
             def_history = []
             avg_bonus = 0.0
             bonus_games = 0
+            avg_recent_pts = float(RECENT_FORM_PAD_PTS) if has_total_points else np.nan
 
         position = (
             str(recent["position"].iloc[-1])
@@ -415,6 +468,7 @@ def _calculate_player_averages(
                 "avg_defensive_contribution": avg_def,
                 "avg_bonus_points": float(shrunk_bonus),
                 "avg_bonus_points_unshrunk": float(avg_bonus),
+                "avg_recent_points": avg_recent_pts,
                 "defensive_contribution_history": def_history,
             }
         )
@@ -683,6 +737,7 @@ def _create_component_predictions(
     player_averages: pd.DataFrame,
     multipliers: pd.DataFrame,
     team_xgc: Optional[pd.DataFrame] = None,
+    recent_form_weight: float = RECENT_FORM_WEIGHT,
 ) -> pd.DataFrame:
     """
     Create predictions for all PREDICTION_COMPONENTS.
@@ -926,6 +981,43 @@ def _create_component_predictions(
         result.append(df[cols].copy())
 
     out = pd.concat(result, ignore_index=True)
+
+    # 10. recent_form: blend (1 - w) * component_sum + w * avg_recent_points per fixture.
+    # Expressed as an additive `recent_form` component carrying w * (avg_recent_points -
+    # component_sum) so each of the 9 underlying components keeps its own face value for
+    # inspection/tests while summing across components yields the exact 80/20 blend.
+    if (
+        recent_form_weight > 0
+        and len(out) > 0
+        and "avg_recent_points" in player_averages.columns
+        and player_averages["avg_recent_points"].notna().any()
+    ):
+        fixture_keys = [
+            c
+            for c in ["element", "event", "kickoff_time", "opponent_team", "is_home"]
+            if c in out.columns and c in combinations.columns
+        ]
+        fixture_totals = (
+            out.groupby(fixture_keys, as_index=False, dropna=False)["predicted_points"]
+            .sum()
+            .rename(columns={"predicted_points": "_model_points"})
+        )
+        p = combinations.merge(
+            player_averages[["element", "hist_games", "avg_recent_points"]],
+            on="element",
+            how="left",
+        ).merge(fixture_totals, on=fixture_keys, how="left")
+        has_recent = p["avg_recent_points"].notna()
+        p["predicted_points"] = np.where(
+            has_recent,
+            recent_form_weight * (p["avg_recent_points"] - p["_model_points"].fillna(0.0)),
+            0.0,
+        )
+        p["component_type"] = "recent_form"
+        p["hist_games"] = p["hist_games"].fillna(0)
+        cols = [c for c in base_cols if c in p.columns]
+        out = pd.concat([out, p[cols].copy()], ignore_index=True)
+
     logger.debug("Created %d total predictions across %d components", len(out), len(all_preds))
     return out
 
@@ -954,6 +1046,7 @@ def generate_predictions(
     shrink_k: float = SHRINK_K,
     cap_min_games: int = CAP_MIN_GAMES,
     bonus_shrink_k: float = BONUS_SHRINK_K,
+    recent_form_weight: float = RECENT_FORM_WEIGHT,
 ) -> pd.DataFrame:
     """
     Generate component-based FPL point predictions for all players and future fixtures.
@@ -971,6 +1064,9 @@ def generate_predictions(
                   in units of games. 0 disables it. See SHRINK_K.
         cap_min_games: Shortest window the outlier cap may touch. See CAP_MIN_GAMES.
         bonus_shrink_k: Same, for bonus points. 0 disables it. See BONUS_SHRINK_K.
+        recent_form_weight: Weight on the player's last-3 (55+ min, capped [1, 10],
+                            padded with 2s) actual points average (default 0.20).
+                            0 disables the blend.
 
     Returns:
         DataFrame with columns: element, name, position, player_team_id, player_team_tier,
@@ -1003,7 +1099,11 @@ def generate_predictions(
     team_xgc = _team_xgc_averages(team_matches, multipliers, team_tiers)
 
     predictions = _create_component_predictions(
-        combinations, player_averages, multipliers, team_xgc=team_xgc
+        combinations,
+        player_averages,
+        multipliers,
+        team_xgc=team_xgc,
+        recent_form_weight=recent_form_weight,
     )
     predictions = _add_team_names(predictions, team_tiers)
 
