@@ -279,7 +279,15 @@ def _global_points_multipliers() -> List["PointsMultiplierEntry"]:
 # fpl-lad shows and is read on that side. Both live in app_config.solver_policy for
 # the same reason player_eligibility does: they are product dials the owner changes
 # without a deploy, and two copies of a number are two numbers.
-SOLVER_POLICY_DEFAULTS = {"display_gameweeks": 5, "wildcard_rate": 1.5, "free_hit_rate": 0.2}
+SOLVER_POLICY_DEFAULTS = {
+    "display_gameweeks": 5,
+    "wildcard_rate": 1.5,
+    "free_hit_rate": 0.2,
+    "future_gw_transfer_penalty": 0.0,
+    "round_trip_penalty": -2.5,
+    "wasted_5ft_penalty": -3.0,
+    "hit_xp_threshold": 2.0,
+}
 _POLICY_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 POLICY_MAX_AGE_SECONDS = 300
 
@@ -431,7 +439,7 @@ class SellingPriceEntry(BaseModel):
 class RolledTransferEntry(BaseModel):
     """How many free transfers to leave unused and roll over in a specific gameweek."""
     gw: int
-    count: int = Field(ge=1, le=5)
+    count: int = Field(ge=0, le=5)
 
 
 class OptimizeRequest(BaseModel):
@@ -1886,6 +1894,10 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         "no_transfer_gws": list(req.no_transfer_gws),
         "rolled_transfers": [(e.gw, e.count) for e in req.rolled_transfers],
         "first_gw_penalty": -1,
+        "future_gw_penalty": float(policy.get("future_gw_transfer_penalty", 0.0)),
+        "round_trip_penalty": float(policy.get("round_trip_penalty", -2.5)),
+        "wasted_5ft_penalty": float(policy.get("wasted_5ft_penalty", -3.0)),
+        "hit_xp_threshold": float(policy.get("hit_xp_threshold", 2.0)),
         "sub_probability": 0.0,
         "predictions": predictions,
         "gw_data": gw_data,
@@ -1917,11 +1929,16 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
         scenario = raw["scenario"]
         fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
         fh_pen = sum(_fh_early_penalty(gw) for gw in scenario["free_hit_gws"])
+        paid_total = sum(
+            int(tr.get("paid_transfers", 0))
+            for tr in (raw["solution"].get("transfers") or {}).values()
+        )
+        hit_offset = (FPL_TRANSFER_COST - TRANSFER_PENALTY_POINTS) * paid_total
         return {"scenario_name": scenario["name"], "free_hit_gws": scenario["free_hit_gws"],
                 "bench_boost_gw": scenario["bench_boost_gw"], "solution": raw["solution"],
                 "squad_points": raw["squad_points"], "scenario": scenario,
                 "total_points": raw["base_points"] + fh_total,
-                "selection_points": raw["base_points"] + fh_total - fh_pen}
+                "selection_points": raw["base_points"] + fh_total + hit_offset - fh_pen}
 
     best_selection = -float("inf")
     for raw in raw_results:
@@ -2125,8 +2142,13 @@ async def _optimize_inner(req: OptimizeRequest, on_progress: ProgressFn = _noop_
             scenario = raw["scenario"]
             fh_total = sum(fh_benefits.get(gw, {}).get("total_points", 0) for gw in scenario["free_hit_gws"])
             fh_pen = sum(_fh_early_penalty(gw) for gw in scenario["free_hit_gws"])
+            paid_total = sum(
+                int(tr.get("paid_transfers", 0))
+                for tr in (raw["solution"].get("transfers") or {}).values()
+            )
+            hit_offset = (FPL_TRANSFER_COST - TRANSFER_PENALTY_POINTS) * paid_total
             total_points = raw["base_points"] + fh_total
-            selection_points = total_points - fh_pen
+            selection_points = total_points + hit_offset - fh_pen
 
             if selection_points > best_selection:
                 best_selection = selection_points

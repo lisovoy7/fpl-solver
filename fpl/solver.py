@@ -58,6 +58,16 @@ FPL_TRANSFER_COST = -4.0
 # by this number and needs its own fix. Override for experiments.
 TRANSFER_PENALTY_POINTS = float(os.environ.get("FPL_TRANSFER_PENALTY", -100))
 FREE_HIT_TRANSFER_PENALTY = -1000
+# Artificial objective penalty per starter whose predicted points in that gameweek are
+# at or below `hit_xp_threshold` (default 2.0). At 1.5x TRANSFER_PENALTY_POINTS (-150
+# vs -100), fielding a non-playing / <=2.0 xP starter is worse than taking 1 hit (-100)
+# to replace him, but better than taking 2 hits (-200) for a single missing starter,
+# while benching him costs 0. Stripped from `objective_value` in extract_solution().
+LOW_XP_STARTER_PENALTY = float(os.environ.get("FPL_LOW_XP_STARTER_PENALTY", -150))
+DEFAULT_HIT_XP_THRESHOLD = float(os.environ.get("FPL_HIT_XP_THRESHOLD", 2.0))
+DEFAULT_ROUND_TRIP_PENALTY = float(os.environ.get("FPL_ROUND_TRIP_PENALTY", -2.5))
+DEFAULT_WASTED_5FT_PENALTY = float(os.environ.get("FPL_WASTED_5FT_PENALTY", -3.0))
+FREE_TRANSFER_BANKING_TIEBREAKER = 0.001
 CHIP_WINDOWS = {'first_half': (1, 19), 'second_half': (20, 38)}
 
 
@@ -86,6 +96,10 @@ class FPLSolver:
         banned_players: Optional[List[int]] = None,
         free_hit_gws: Optional[List[int]] = None,
         first_gw_transfer_penalty: Optional[float] = None,
+        future_gw_transfer_penalty: Optional[float] = None,
+        round_trip_penalty: Optional[float] = None,
+        wasted_5ft_penalty: Optional[float] = None,
+        hit_xp_threshold: Optional[float] = None,
         sub_probability: float = 0.0,
         bench_boost_gw: int = -1,
         triple_captain_gw: int = -1,
@@ -154,6 +168,26 @@ class FPLSolver:
         self.banned_players = banned_players or []
         self.free_hit_gws = free_hit_gws or []
         self.first_gw_transfer_penalty = first_gw_transfer_penalty if first_gw_transfer_penalty is not None else -1
+        self.future_gw_transfer_penalty = (
+            float(future_gw_transfer_penalty)
+            if future_gw_transfer_penalty is not None
+            else 0.0
+        )
+        self.round_trip_penalty = (
+            float(round_trip_penalty)
+            if round_trip_penalty is not None
+            else DEFAULT_ROUND_TRIP_PENALTY
+        )
+        self.wasted_5ft_penalty = (
+            float(wasted_5ft_penalty)
+            if wasted_5ft_penalty is not None
+            else DEFAULT_WASTED_5FT_PENALTY
+        )
+        self.hit_xp_threshold = (
+            float(hit_xp_threshold)
+            if hit_xp_threshold is not None
+            else DEFAULT_HIT_XP_THRESHOLD
+        )
         self.sub_probability = sub_probability
         self.bench_boost_gw = bench_boost_gw
         self.triple_captain_gw = triple_captain_gw
@@ -171,6 +205,8 @@ class FPLSolver:
                 self.rolled_transfers[int(gw)] = max(self.rolled_transfers.get(int(gw), 0), int(c))
         self.wildcard_rate = wildcard_rate
         self._club_cache = None
+        self._low_xp_starter_pairs = []
+        self._wc_hit_offsets = {}
 
         self.players = None
         self.predictions = None
@@ -481,9 +517,137 @@ class FPLSolver:
             lowBound=0,
             cat='Continuous',
         )
+        if self.round_trip_penalty != 0.0:
+            variables['regular_move'] = pulp.LpVariable.dicts(
+                "regular_move",
+                [(p, t) for p in players for t in gameweeks],
+                lowBound=0,
+                cat='Continuous',
+            )
+            variables['round_trip_excess'] = pulp.LpVariable.dicts(
+                "round_trip_excess",
+                players,
+                lowBound=0,
+                cat='Continuous',
+            )
+        if self.wasted_5ft_penalty != 0.0:
+            variables['wasted_5th_ft'] = pulp.LpVariable.dicts(
+                "wasted_5th_ft",
+                gameweeks,
+                lowBound=0,
+                cat='Continuous',
+            )
 
         self.variables = variables
         logger.debug("Created all decision variables")
+
+    def _forced_starter_ids_for_gw(self, actual_gw: int) -> set:
+        forced = set()
+        for entries in (
+            self.forced_lineup_players,
+            self.forced_captain_players,
+            self.forced_vice_captain_players,
+        ):
+            for pid, gws in (entries or []):
+                if actual_gw in (gws or []):
+                    forced.add(pid)
+        return forced
+
+    def _forced_bench_ids_for_gw(self, actual_gw: int) -> set:
+        forced = set()
+        for pid, gws in (self.forced_bench_players or []):
+            if actual_gw in (gws or []):
+                forced.add(pid)
+        return forced
+
+    def _effective_xp(self, p: int, actual_gw: int) -> float:
+        if any(p == pid and actual_gw in gws for pid, gws in self.non_playing_players):
+            return 0.0
+        return float((self.expected_points or {}).get((p, actual_gw), 0.0))
+
+    def _gw1_wildcard_offset(self) -> float:
+        """
+        Artificial penalty offset applied to wildcard[1] so that an emergency hit in
+        GW1 (charged TRANSFER_PENALTY_POINTS = -100 in the MILP instead of the real
+        FPL_TRANSFER_COST = -4) does not trick the solver into playing an early
+        Wildcard just to erase the -96 artificial part of the hit penalty.
+        """
+        if (
+            self.players is None
+            or 'position' not in self.players.columns
+            or not self.initial_squad
+            or len(self.initial_squad) < TOTAL_LINEUP_SIZE
+            or self.start_gw in self.free_hit_gws
+            or self.force_wildcard_gw == self.start_gw
+            or self.hit_xp_threshold is None
+        ):
+            return 0.0
+
+        actual_gw = self.start_gw
+        pos_map = dict(zip(self.players['element'], self.players['position']))
+        banned_set = set(self.banned_players or [])
+        forced_starters = self._forced_starter_ids_for_gw(actual_gw)
+        forced_bench = self._forced_bench_ids_for_gw(actual_gw)
+
+        valid_by_pos = {'GK': 0, 'DEF': 0, 'MID': 0, 'FWD': 0}
+        for p in self.initial_squad:
+            if p in banned_set or p in forced_bench:
+                continue
+            pos = pos_map.get(p)
+            if pos not in valid_by_pos:
+                continue
+            if (p, actual_gw) not in (self.expected_points or {}):
+                if self.club_gameweeks is None:
+                    continue
+                club = self._club_of(p)
+                if club is not None and actual_gw not in self.club_gameweeks.get(club, set()):
+                    continue
+            if p in forced_starters or self._effective_xp(p, actual_gw) > self.hit_xp_threshold:
+                valid_by_pos[pos] += 1
+
+        g = min(LINEUP_CONSTRAINTS['GK'][1], valid_by_pos['GK'])
+        d = min(LINEUP_CONSTRAINTS['DEF'][1], valid_by_pos['DEF'])
+        m = min(LINEUP_CONSTRAINTS['MID'][1], valid_by_pos['MID'])
+        f = min(LINEUP_CONSTRAINTS['FWD'][1], valid_by_pos['FWD'])
+
+        pos_shortage = (
+            max(0, LINEUP_CONSTRAINTS['GK'][0] - g)
+            + max(0, LINEUP_CONSTRAINTS['DEF'][0] - d)
+            + max(0, LINEUP_CONSTRAINTS['MID'][0] - m)
+            + max(0, LINEUP_CONSTRAINTS['FWD'][0] - f)
+        )
+        g_after = max(LINEUP_CONSTRAINTS['GK'][0], g)
+        d_after = max(LINEUP_CONSTRAINTS['DEF'][0], d)
+        m_after = max(LINEUP_CONSTRAINTS['MID'][0], m)
+        f_after = max(LINEUP_CONSTRAINTS['FWD'][0], f)
+        total_shortage = pos_shortage + max(
+            0, TOTAL_LINEUP_SIZE - (g_after + d_after + m_after + f_after)
+        )
+
+        banned_owned = sum(1 for p in self.initial_squad if p in banned_set)
+        owned_set = set(self.initial_squad)
+        forced_all_gw1 = set(forced_starters) | set(forced_bench)
+        for pid, gws in (self.forced_squad_players or []):
+            if actual_gw in (gws or []):
+                forced_all_gw1.add(pid)
+        unowned_forced = sum(1 for p in forced_all_gw1 if p not in owned_set)
+
+        min_transfers = max(total_shortage, banned_owned, unowned_forced)
+
+        if actual_gw in self.no_transfer_gws:
+            return LOW_XP_STARTER_PENALTY * total_shortage
+        if actual_gw in self.rolled_transfers:
+            allowed_ft = max(0, self.initial_transfers - self.rolled_transfers[actual_gw])
+            unfixable = max(0, total_shortage - allowed_ft)
+            return LOW_XP_STARTER_PENALTY * unfixable
+
+        emergency_hits = max(0, min_transfers - self.initial_transfers)
+        if emergency_hits <= 0:
+            return 0.0
+        return (
+            (TRANSFER_PENALTY_POINTS - FPL_TRANSFER_COST) * emergency_hits
+            + float(self.first_gw_transfer_penalty or 0.0) * min_transfers
+        )
 
     def create_objective(self) -> None:
         """Create the objective function to maximize total expected points."""
@@ -506,6 +670,8 @@ class FPLSolver:
                     self.expected_points[(player_id, gw)] = 0.0
 
         expected_points = self.expected_points
+        self._low_xp_starter_pairs = []
+        self._wc_hit_offsets = {}
         objective_terms = []
         players = self.players['element'].tolist()
         gameweeks = list(range(1, self.T + 1))
@@ -531,18 +697,24 @@ class FPLSolver:
             actual_gw = self.start_gw + t - 1
             is_bench_boost_gw = actual_gw == self.bench_boost_gw
             is_triple_captain_gw = actual_gw == self.triple_captain_gw
+            is_fh_gw = actual_gw in self.free_hit_gws
+            forced_starters = self._forced_starter_ids_for_gw(actual_gw)
 
             for p in players:
+                eff_pt = self._effective_xp(p, actual_gw)
+                if (
+                    not is_fh_gw
+                    and self.hit_xp_threshold is not None
+                    and eff_pt <= self.hit_xp_threshold
+                    and p not in forced_starters
+                ):
+                    objective_terms.append(LOW_XP_STARTER_PENALTY * self.variables['y'][(p, t)])
+                    self._low_xp_starter_pairs.append((p, t))
+
                 if (p, actual_gw) not in expected_points:
                     continue
 
-                E_pt = expected_points[(p, actual_gw)]
-                is_non_playing = any(
-                    p == player_id and actual_gw in gw_list
-                    for player_id, gw_list in self.non_playing_players
-                )
-                if is_non_playing:
-                    E_pt = 0
+                E_pt = eff_pt
 
                 objective_terms.append(lineup_weight * E_pt * self.variables['y'][(p, t)])
 
@@ -565,6 +737,11 @@ class FPLSolver:
                     if is_bench_boost_gw:
                         objective_terms.append(lineup_complement * E_pt * self.variables['c'][(p, t)])
 
+        gw1_wc_offset = self._gw1_wildcard_offset()
+        if gw1_wc_offset != 0.0 and 1 in self.variables.get('wildcard', {}):
+            objective_terms.append(gw1_wc_offset * self.variables['wildcard'][1])
+            self._wc_hit_offsets[1] = gw1_wc_offset
+
         for t in gameweeks:
             actual_gw = self.start_gw + t - 1
             transfer_penalty = FREE_HIT_TRANSFER_PENALTY if actual_gw in self.free_hit_gws else TRANSFER_PENALTY_POINTS
@@ -574,6 +751,10 @@ class FPLSolver:
                 objective_terms.append(
                     self.first_gw_transfer_penalty * self.variables['first_gw_penalty_transfers'][t]
                 )
+            elif self.future_gw_transfer_penalty:
+                objective_terms.append(
+                    self.future_gw_transfer_penalty * self.variables['first_gw_penalty_transfers'][t]
+                )
 
             if self.wildcard_rate > 0 and actual_gw != self.force_wildcard_gw:
                 is_cutoff_gw = actual_gw in (CHIP_WINDOWS['first_half'][1], CHIP_WINDOWS['second_half'][1])
@@ -582,6 +763,21 @@ class FPLSolver:
                     objective_terms.append(
                         -wc_early_penalty * self.variables['wildcard'][t]
                     )
+
+        if self.round_trip_penalty != 0.0 and 'round_trip_excess' in self.variables:
+            for p in players:
+                objective_terms.append(
+                    self.round_trip_penalty * self.variables['round_trip_excess'][p]
+                )
+
+        if self.wasted_5ft_penalty != 0.0 and 'wasted_5th_ft' in self.variables:
+            for t in gameweeks:
+                objective_terms.append(
+                    self.wasted_5ft_penalty * self.variables['wasted_5th_ft'][t]
+                )
+                objective_terms.append(
+                    FREE_TRANSFER_BANKING_TIEBREAKER * self.variables['A'][t]
+                )
 
         self.prob += pulp.lpSum(objective_terms), "Total_Expected_Points"
         logger.debug("Objective function created")
@@ -634,6 +830,22 @@ class FPLSolver:
                 f"Transfer_Count_Out_{t}",
             )
 
+        if self.round_trip_penalty != 0.0 and 'round_trip_excess' in self.variables:
+            non_fh_gws = [t for t in gameweeks if t not in fh_internal_gws]
+            for p in players:
+                for t in non_fh_gws:
+                    self.prob += (
+                        self.variables['regular_move'][(p, t)]
+                        >= self.variables['s'][(p, t)] + self.variables['r'][(p, t)] - self.variables['wildcard'][t],
+                        f"Regular_Move_{p}_{t}",
+                    )
+                if non_fh_gws:
+                    self.prob += (
+                        self.variables['round_trip_excess'][p]
+                        >= pulp.lpSum([self.variables['regular_move'][(p, t)] for t in non_fh_gws]) - 1,
+                        f"Round_Trip_Excess_{p}",
+                    )
+
         logger.debug("Squad flow constraints added")
 
     def add_transfer_banking_constraints(self) -> None:
@@ -670,6 +882,40 @@ class FPLSolver:
                 f"Transfer_Banking_Wildcard_Lower_{t}",
             )
             self.prob += (self.variables['A'][t + 1] <= MAX_FREE_TRANSFERS, f"Transfer_Cap_{t}")
+
+        if self.wasted_5ft_penalty != 0.0 and 'wasted_5th_ft' in self.variables:
+            fh_internal_gws = {
+                gw - self.start_gw + 1
+                for gw in self.free_hit_gws
+                if 1 <= gw - self.start_gw + 1 <= self.T
+            }
+            user_locked = {
+                gw - self.start_gw + 1
+                for gw in (set(self.no_transfer_gws or []) | set((self.rolled_transfers or {}).keys()))
+            }
+            for t in range(1, self.T):
+                if t in fh_internal_gws:
+                    continue
+                self.prob += (
+                    self.variables['A'][t + 1]
+                    >= self.variables['A'][t]
+                    - self.variables['u'][t]
+                    + 1
+                    - self.variables['wasted_5th_ft'][t]
+                    - M * self.variables['wildcard'][t],
+                    f"Transfer_Banking_Exact_Lower_{t}",
+                )
+            for t in gameweeks:
+                if t in fh_internal_gws or t in user_locked:
+                    continue
+                self.prob += (
+                    self.variables['wasted_5th_ft'][t]
+                    >= self.variables['A'][t]
+                    - (MAX_FREE_TRANSFERS - 1)
+                    - self.variables['u'][t]
+                    - MAX_FREE_TRANSFERS * self.variables['wildcard'][t],
+                    f"Wasted_5th_FT_{t}",
+                )
 
         logger.debug("Transfer banking constraints added")
 
@@ -1676,7 +1922,7 @@ class FPLSolver:
 
         for actual_gw, count in sorted(self.rolled_transfers.items()):
             t = actual_gw - self.start_gw + 1
-            if not 1 <= t <= self.T or count <= 0:
+            if not 1 <= t <= self.T or count < 0:
                 continue
             self.prob += (
                 self.variables['u'][t]
@@ -1686,7 +1932,7 @@ class FPLSolver:
             # Zero out penalty_transfers across the window that builds A[t] so the MILP
             # cannot pay a phantom -4 hit on a free transfer in an earlier gameweek just
             # to manufacture a fake banked transfer for GW `actual_gw`.
-            first_no_hit_t = t if count == 1 else 1
+            first_no_hit_t = t if count <= 1 else 1
             for s in range(first_no_hit_t, t + 1):
                 self.prob += (
                     self.variables['penalty_transfers'][s] == 0,
@@ -1804,8 +2050,55 @@ class FPLSolver:
                     is_cutoff_gw = actual_gw in (CHIP_WINDOWS['first_half'][1], CHIP_WINDOWS['second_half'][1])
                     wc_penalty_applied += 0.0 if is_cutoff_gw else ((15.0, 9.5, 5.5, 2.5, 1.0)[t - 1] if t <= 5 else 0.0)
 
+        wc_hit_offset_applied = sum(
+            -offset
+            for t, offset in getattr(self, '_wc_hit_offsets', {}).items()
+            if t in self.variables.get('wildcard', {}) and _on(self.variables['wildcard'][t])
+        )
+        low_xp_penalty_applied = sum(
+            -LOW_XP_STARTER_PENALTY
+            for p, t in getattr(self, '_low_xp_starter_pairs', [])
+            if (p, t) in self.variables.get('y', {}) and _on(self.variables['y'][(p, t)])
+        )
+        future_transfer_penalty_applied = (
+            sum(
+                -self.future_gw_transfer_penalty * _count(self.variables['first_gw_penalty_transfers'][t])
+                for t in range(2, self.T + 1)
+                if t in self.variables.get('first_gw_penalty_transfers', {})
+            )
+            if getattr(self, 'future_gw_transfer_penalty', 0)
+            else 0.0
+        )
+        round_trip_penalty_applied = (
+            sum(
+                -self.round_trip_penalty * float(pulp.value(self.variables['round_trip_excess'][p]) or 0.0)
+                for p in self.players['element'].tolist()
+                if p in self.variables.get('round_trip_excess', {})
+            )
+            if getattr(self, 'round_trip_penalty', 0)
+            else 0.0
+        )
+        wasted_5ft_penalty_applied = (
+            sum(
+                -self.wasted_5ft_penalty * float(pulp.value(self.variables['wasted_5th_ft'][t]) or 0.0)
+                - FREE_TRANSFER_BANKING_TIEBREAKER * float(pulp.value(self.variables['A'][t]) or 0.0)
+                for t in range(1, self.T + 1)
+                if t in self.variables.get('wasted_5th_ft', {})
+            )
+            if getattr(self, 'wasted_5ft_penalty', 0)
+            else 0.0
+        )
+
         solution = {
-            'objective_value': float(pulp.value(self.prob.objective)) + wc_penalty_applied,
+            'objective_value': (
+                float(pulp.value(self.prob.objective))
+                + wc_penalty_applied
+                + wc_hit_offset_applied
+                + low_xp_penalty_applied
+                + future_transfer_penalty_applied
+                + round_trip_penalty_applied
+                + wasted_5ft_penalty_applied
+            ),
             'start_gw': self.start_gw,
             'squads': {},
             'lineups': {},

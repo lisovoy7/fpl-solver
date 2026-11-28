@@ -195,6 +195,117 @@ def test_wildcard_in_partially_rolled_gw_is_still_allowed():
     assert sol['transfers'][1]['paid_transfers'] == 0
 
 
+def test_emergency_hit_taken_when_fewer_than_11_starters_above_threshold():
+    """With 3 of 5 DEFs at 1.0 xP (<= 2.0 threshold) so only 2 DEFs are > 2.0
+    (1 short of the 3-DEF lineup minimum) and 0 free transfers, the solver takes
+    1 emergency hit; with 4 of 5 DEFs at 1.0 xP (2 short of 3-DEF minimum) and
+    1 free transfer, it uses 1 FT + 1 hit."""
+    sol_1_hit = _solve(_solver(free_transfers=0, extra_replacements=2))
+    assert sol_1_hit['transfers'][1]['count'] == 1
+    assert sol_1_hit['transfers'][1]['paid_transfers'] == 1
+
+    sol_ft_plus_hit = _solve(_solver(free_transfers=1, extra_replacements=3))
+    assert sol_ft_plus_hit['transfers'][1]['count'] == 2
+    assert sol_ft_plus_hit['transfers'][1]['free_transfers'] == 1
+    assert sol_ft_plus_hit['transfers'][1]['paid_transfers'] == 1
+
+
+def test_rolled_transfers_count_zero_allows_free_transfers_and_blocks_hits():
+    """count=0 in rolled_transfers spends available free transfers (1 FT) while
+    blocking any -4 paid hit even when 2 starters are below the 2.0 threshold."""
+    sol = _solve(_solver(
+        rolled_transfers=[(START_GW, 0)],
+        free_transfers=1,
+        extra_replacements=3,
+    ))
+    assert sol['transfers'][1]['count'] == 1
+    assert sol['transfers'][1]['free_transfers'] == 1
+    assert sol['transfers'][1]['paid_transfers'] == 0
+
+
+def test_round_trip_penalty_blocks_marginal_flip_flop_and_strips_from_objective():
+    """A 0.5-point 1-week dip on a star forward (starting 3 FWDs) triggers a sell-then-buy-back
+    round-trip when round_trip_penalty=0, and stays put when round_trip_penalty=-2.5."""
+    star_fwd = FWDS[0]
+    alt_fwd = 301
+    pool = POOL + [alt_fwd]
+    positions = POSITIONS | {alt_fwd: 'FWD'}
+
+    def _build_rt_solver(rt_penalty: float) -> FPLSolver:
+        rows = []
+        for idx_gw, gw in enumerate(range(START_GW, START_GW + 3)):
+            for p in pool:
+                if p == star_fwd:
+                    pts = 5.5 if idx_gw == 1 else 9.0
+                elif p in FWDS or p == alt_fwd:
+                    pts = 6.0
+                else:
+                    pts = 4.0
+                rows.append({'element': p, 'event': gw, 'predicted_points': pts})
+        s = FPLSolver(
+            planning_horizon=3,
+            budget=1000,
+            start_gw=START_GW,
+            round_trip_penalty=rt_penalty,
+            wasted_5ft_penalty=0.0,
+        )
+        s.load_predictions(pd.DataFrame(rows))
+        s.players = pd.DataFrame({
+            'element': pool,
+            'name': [str(p) for p in pool],
+            'position': [positions[p] for p in pool],
+            'value': [50] * len(pool),
+            'team': [(i % 10) + 1 for i in range(len(pool))],
+        })
+        s.set_initial_squad(list(SQUAD), available_transfers=1)
+        s.set_chip_state(wildcard_first_half=1, wildcard_second_half=1)
+        s.build_model()
+        return s
+
+    sol_no_pen = _solve(_build_rt_solver(0.0))
+    assert star_fwd in sol_no_pen['transfers'][2]['out']
+    assert star_fwd in sol_no_pen['transfers'][3]['in']
+
+    sol_with_pen = _solve(_build_rt_solver(-2.5))
+    assert sol_with_pen['transfers'][2]['count'] == 0
+    assert sol_with_pen['transfers'][3]['count'] == 0
+
+
+def test_wasted_5ft_penalty_spends_capped_5th_transfer():
+    """Sitting at 5 free transfers with a 0.2-point upgrade available rolls when
+    wasted_5ft_penalty=0 (if first_gw_transfer_penalty=-1), or in GW2 when a 0.1-pt
+    upgrade is available, and uses a transfer when wasted_5ft_penalty=-3.0."""
+    rows = []
+    for idx_gw, gw in enumerate(range(START_GW, START_GW + 2)):
+        for p in POOL:
+            if p == REPLACEMENT:
+                pts = 4.0 if idx_gw == 0 else 4.2
+            else:
+                pts = 4.0
+            rows.append({'element': p, 'event': gw, 'predicted_points': pts})
+    s = FPLSolver(
+        planning_horizon=2,
+        budget=1000,
+        start_gw=START_GW,
+        round_trip_penalty=-2.5,
+        wasted_5ft_penalty=-3.0,
+    )
+    s.load_predictions(pd.DataFrame(rows))
+    s.players = pd.DataFrame({
+        'element': POOL,
+        'name': [str(p) for p in POOL],
+        'position': [POSITIONS[p] for p in POOL],
+        'value': [50] * len(POOL),
+        'team': [(i % 10) + 1 for i in range(len(POOL))],
+    })
+    s.set_initial_squad(list(SQUAD), available_transfers=5)
+    s.set_chip_state(wildcard_first_half=1, wildcard_second_half=1)
+    s.build_model()
+    sol = _solve(s)
+    assert sol['transfers'][1]['count'] + sol['transfers'][2]['count'] >= 1
+    assert abs(sol['objective_value'] - round(sol['objective_value'], 1)) < 1e-6
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

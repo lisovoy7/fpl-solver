@@ -645,6 +645,10 @@ def main() -> None:
     # 7. Solve each scenario
     sub_probability = solver_params.get("sub_probability", 0.0)
     first_gw_penalty = solver_params.get("first_gw_transfer_penalty", -1)
+    future_gw_penalty = solver_params.get("future_gw_transfer_penalty", 0)
+    round_trip_penalty = solver_params.get("round_trip_penalty", -2.5)
+    wasted_5ft_penalty = solver_params.get("wasted_5ft_penalty", -3.0)
+    hit_xp_threshold = solver_params.get("hit_xp_threshold", 2.0)
     time_limit = solver_params.get("time_limit_per_scenario", 15)
     if args.time_limit is not None:
         time_limit = args.time_limit
@@ -669,6 +673,10 @@ def main() -> None:
         "no_transfer_gws": overrides.get("no_transfer_gws"),
         "rolled_transfers": overrides.get("rolled_transfers"),
         "first_gw_penalty": first_gw_penalty,
+        "future_gw_penalty": future_gw_penalty,
+        "round_trip_penalty": round_trip_penalty,
+        "wasted_5ft_penalty": wasted_5ft_penalty,
+        "hit_xp_threshold": hit_xp_threshold,
         "sub_probability": sub_probability,
         "predictions": predictions,
         "gw_data": gw_data,

@@ -72,6 +72,20 @@ solver:
   # Discourages the solver from front-loading transfers.  -1 = mild penalty.
   first_gw_transfer_penalty: -1
 
+  # Artificial penalty per transfer in GW2+ of the planning horizon (0 = disabled).
+  future_gw_transfer_penalty: 0
+
+  # Artificial penalty per regular-transfer round-trip (moving the same player more
+  # than once across non-Wildcard, non-Free-Hit gameweeks).
+  round_trip_penalty: -2.5
+
+  # Artificial penalty for rolling while already capped at 5 free transfers (burning a 5th FT).
+  wasted_5ft_penalty: -3.0
+
+  # Starters with predicted points at or below this threshold trigger an emergency
+  # hit if no free transfer is available to replace them.
+  hit_xp_threshold: 2.0
+
   # Solver time limit in seconds per chip scenario.
   #
   # This is a *quality* knob, not just a speed one: CBC almost never proves
